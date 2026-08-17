@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# Editor / OS
+.vscode/
+.idea/
+*.tmp
+Thumbs.db
+.DS_Store
+
+# Claude Code local settings
+.claude/
