@@ -84,7 +84,9 @@ def bgr_to_qpixmap(frame: np.ndarray) -> QPixmap:
     """Convert an OpenCV BGR frame to a QPixmap at full resolution."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
-    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+    # QImage wraps the NumPy buffer without copying; .copy() detaches it so
+    # the pixmap never depends on the lifetime of the local array.
+    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
 
 
@@ -105,6 +107,8 @@ class MainWindow(QMainWindow):
         self._brightness_original: np.ndarray | None = None
         self._brightness_display: np.ndarray | None = None
         self._extraction_in_point: int = 0
+        self._extraction_requested: int = 0
+        self._delta_user_set: bool = False
         self._cli_args = None
 
         self._build_ui()
@@ -372,7 +376,7 @@ class MainWindow(QMainWindow):
 
         self._results_model = QStandardItemModel(0, 6)
         self._results_model.setHorizontalHeaderLabels([
-            "#", "Display Frame", "Output Frame", "Direction",
+            "#", "Original Frame", "Display Frame", "Direction",
             "Latency (fr)", "Latency (ms)",
         ])
         self.results_table = QTableView()
@@ -402,17 +406,10 @@ class MainWindow(QMainWindow):
         self.prev_trans_button.clicked.connect(self._goto_prev_transition)
         self.next_trans_button.clicked.connect(self._goto_next_transition)
 
-        QShortcut(QKeySequence("Left"),          self).activated.connect(lambda: self.timeline.step(-1))
-        QShortcut(QKeySequence("Right"),         self).activated.connect(lambda: self.timeline.step(1))
-        QShortcut(QKeySequence("Up"),            self).activated.connect(self._goto_prev_transition)
-        QShortcut(QKeySequence("Down"),          self).activated.connect(self._goto_next_transition)
-        QShortcut(QKeySequence("PgUp"),          self).activated.connect(self._step_large_back)
-        QShortcut(QKeySequence("PgDown"),        self).activated.connect(self._step_large_fwd)
-        QShortcut(QKeySequence("I"),             self).activated.connect(self._mark_in)
-        QShortcut(QKeySequence("O"),             self).activated.connect(self._mark_out)
-        QShortcut(QKeySequence("Home"),          self).activated.connect(self._goto_in)
-        QShortcut(QKeySequence("End"),           self).activated.connect(self._goto_out)
-        QShortcut(QKeySequence("Space"),         self).activated.connect(self._toggle_playback)
+        # Navigation keys are handled in keyPressEvent, NOT as QShortcuts:
+        # window-context shortcuts intercept keys before the focused widget
+        # sees them, which broke arrow/Home/End editing in the spinboxes.
+        # Only chords and function keys stay as shortcuts.
         QShortcut(QKeySequence("Ctrl+Z"),        self).activated.connect(self._undo_roi)
         QShortcut(QKeySequence("F1"),            self).activated.connect(self._show_help)
         QShortcut(QKeySequence("?"),             self).activated.connect(self._show_help)
@@ -430,7 +427,7 @@ class MainWindow(QMainWindow):
         self.analyze_btn.clicked.connect(self._on_analyze_clicked)
         self.cancel_btn.clicked.connect(self._on_cancel_clicked)
         self.polarity_combo.currentIndexChanged.connect(self._on_polarity_changed)
-        self.delta_spin.valueChanged.connect(lambda v: self.brightness_graph.set_delta(float(v)))
+        self.delta_spin.valueChanged.connect(self._on_delta_spin_changed)
         self.spacing_spin.valueChanged.connect(lambda v: self.brightness_graph.set_min_spacing(v))
         self.max_latency_spin.valueChanged.connect(lambda v: self.brightness_graph.set_max_latency(v))
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
@@ -473,6 +470,7 @@ class MainWindow(QMainWindow):
         self._playback_timer.stop()
         self._stop_extractor()
         self._clear_brightness()
+        self._delta_user_set = False
         if self.reader is not None:
             self.reader.release()
 
@@ -593,6 +591,30 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------- keyboard shortcuts
 
+    def keyPressEvent(self, event) -> None:
+        """Navigation keys, reached only when no focused widget consumed them
+        (a focused spinbox keeps its own arrow/Home/End handling)."""
+        handlers = {
+            Qt.Key.Key_Left:     lambda: self.timeline.step(-1),
+            Qt.Key.Key_Right:    lambda: self.timeline.step(1),
+            Qt.Key.Key_Up:       self._goto_prev_transition,
+            Qt.Key.Key_Down:     self._goto_next_transition,
+            Qt.Key.Key_PageUp:   self._step_large_back,
+            Qt.Key.Key_PageDown: self._step_large_fwd,
+            Qt.Key.Key_I:        self._mark_in,
+            Qt.Key.Key_O:        self._mark_out,
+            Qt.Key.Key_Home:     self._goto_in,
+            Qt.Key.Key_End:      self._goto_out,
+            Qt.Key.Key_Space:    self._toggle_playback,
+        }
+        handler = handlers.get(event.key())
+        plain = not (event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
+        if handler is not None and plain:
+            handler()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _mark_in(self) -> None:
         if self.reader is not None:
             self.timeline.set_in_point(self.timeline.current_frame)
@@ -649,8 +671,12 @@ class MainWindow(QMainWindow):
             self._playback_timer.stop()
 
     def _undo_roi(self) -> None:
+        # Same invalidation as a normal ROI edit — the restored ROIs make
+        # any existing extraction stale.
         if self.frame_view.undo_roi():
             self._update_brightness()
+            self._clear_brightness()
+            self._update_analyze_button()
 
     def _show_help(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -711,7 +737,16 @@ class MainWindow(QMainWindow):
         if roi_orig is None or roi_disp is None:
             return
 
+        # A replaced-but-still-running worker would be garbage collected
+        # while its thread is alive (hard crash) — make sure it is done.
+        if self._extractor is not None:
+            self._extractor.cancel()
+            self._extractor.wait()
+
         meta = self.reader.metadata
+        self._extraction_requested = (
+            self.timeline.out_point - self.timeline.in_point + 1
+        )
         self._extractor = BrightnessExtractor(
             path=str(meta.path),
             in_point=self.timeline.in_point,
@@ -724,6 +759,10 @@ class MainWindow(QMainWindow):
         self._extractor.progress.connect(self._on_extract_progress)
         self._extractor.extraction_done.connect(self._on_extract_finished)
         self._extractor.error.connect(self._on_extract_error)
+        # Built-in QThread.finished: fires when the thread has actually
+        # exited, on every path (completed, cancelled, errored) — the one
+        # place Analyze can safely be re-enabled.
+        self._extractor.finished.connect(self._on_extractor_thread_exit)
 
         self.progress_bar.setValue(0)
         self.analysis_widget.show()
@@ -733,6 +772,12 @@ class MainWindow(QMainWindow):
     def _on_cancel_clicked(self) -> None:
         if self._extractor is not None:
             self._extractor.cancel()
+        self.analysis_widget.hide()
+
+    def _on_extractor_thread_exit(self) -> None:
+        if self.sender() is not self._extractor:
+            return  # stale notification from an already-replaced worker
+        self._extractor = None
         self.analysis_widget.hide()
         self._update_analyze_button()
 
@@ -747,12 +792,22 @@ class MainWindow(QMainWindow):
         self._extraction_in_point = first_frame
         auto_delta = self.brightness_graph.set_data(orig, disp, first_frame)
         if self._cli_args is not None and self._cli_args.min_delta is not None:
+            # CLI value applies to the first analysis only; afterwards it is
+            # the user's spinbox that rules.
             effective_delta = float(self._cli_args.min_delta)
+            self._cli_args.min_delta = None
+            self._delta_user_set = True
+            self.brightness_graph.set_delta(effective_delta)
+        elif self._delta_user_set:
+            effective_delta = float(self.delta_spin.value())
             self.brightness_graph.set_delta(effective_delta)
         else:
-            effective_delta = auto_delta
+            # Round the auto value and push it back so the integer shown in
+            # the spinbox is exactly the threshold in effect.
+            effective_delta = float(int(round(auto_delta)))
+            self.brightness_graph.set_delta(effective_delta)
         self.delta_spin.blockSignals(True)
-        self.delta_spin.setValue(int(round(effective_delta)))
+        self.delta_spin.setValue(int(effective_delta))
         self.delta_spin.blockSignals(False)
         self.delta_spin.setEnabled(True)
         self.spacing_spin.setEnabled(True)
@@ -761,15 +816,21 @@ class MainWindow(QMainWindow):
         self.next_trans_button.setEnabled(True)
         self.analysis_widget.hide()
         self.fps_verify_widget.show()
-        QTimer.singleShot(0, self._update_analyze_button)
         count = len(orig)
-        self.status_label.setText(
-            f"Analysis complete — {count} frames extracted "
-            f"(frames {first_frame}–{first_frame + count - 1})"
-        )
+        if count < self._extraction_requested:
+            self.status_label.setText(
+                f"Analysis stopped early — file ended: {count} of "
+                f"{self._extraction_requested} frames extracted "
+                f"(frames {first_frame}–{first_frame + count - 1})"
+            )
+        else:
+            self.status_label.setText(
+                f"Analysis complete — {count} frames extracted "
+                f"(frames {first_frame}–{first_frame + count - 1})"
+            )
 
     def _on_results_row_clicked(self, index) -> None:
-        item = self._results_model.item(index.row(), 1)  # column 1 = Display Frame = orig_frame
+        item = self._results_model.item(index.row(), 1)  # column 1 = Original Frame
         if item is not None and self.reader is not None:
             self.show_frame(int(item.text()))
 
@@ -798,11 +859,13 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
         rows = [
             {
                 "#": i,
-                "Display Frame": p.orig_frame,
-                "Output Frame": p.disp_frame,
+                "Original Frame": p.orig_frame,
+                "Display Frame": p.disp_frame,
                 "Direction": "Dark→Light" if p.polarity == "rising" else "Light→Dark",
                 "Latency (frames)": p.delta_frames(),
                 "Latency (ms)": round(p.delta_ms(fps), 2),
@@ -849,12 +912,9 @@ class MainWindow(QMainWindow):
             self.period_meas_label.setText(
                 f"Orig period: {period_fr:.1f} fr = {period_ms:.1f} ms"
             )
-            known_ms = self.known_period_spin.value()
-            if known_ms > 0:
-                computed = period_fr / (known_ms / 1000.0)
-                self.computed_fps_label.setText(f"Computed FPS: {computed:.3f}")
-            else:
-                self.computed_fps_label.setText("Computed FPS: --")
+            known_ms = self.known_period_spin.value()  # spin range floor is 10, never 0
+            computed = period_fr / (known_ms / 1000.0)
+            self.computed_fps_label.setText(f"Computed FPS: {computed:.3f}")
         else:
             self.period_meas_label.setText("Orig period: -- (need ≥2 transitions)")
             self.computed_fps_label.setText("Computed FPS: --")
@@ -921,9 +981,15 @@ class MainWindow(QMainWindow):
         self.brightness_graph.set_polarity(mode)
         self._update_analyze_button()
 
+    def _on_delta_spin_changed(self, value: int) -> None:
+        # A user-chosen threshold survives re-analysis; only an untouched
+        # spinbox gets the auto-computed value (programmatic updates go
+        # through blockSignals and don't land here).
+        self._delta_user_set = True
+        self.brightness_graph.set_delta(float(value))
+
     def _on_extract_error(self, msg: str) -> None:
         self.analysis_widget.hide()
-        self._update_analyze_button()
         self.status_label.setText(f"Analysis error: {msg}")
 
     def _clear_brightness(self) -> None:
@@ -957,7 +1023,7 @@ class MainWindow(QMainWindow):
             self._extractor.cancel()
             self._extractor.wait()
         self._extractor = None
-        self.analysis_widget.hide() if hasattr(self, "analysis_widget") else None
+        self.analysis_widget.hide()
 
     # ----------------------------------------------------------------- close
 
@@ -991,7 +1057,7 @@ def main() -> None:
     parser.add_argument("--max-latency",  type=int,          metavar="FRAMES")
     parser.add_argument("--in-point",     type=int,          metavar="FRAME")
     parser.add_argument("--out-point",    type=int,          metavar="FRAME")
-    args, _ = parser.parse_known_args()
+    args = parser.parse_args()
 
     app = QApplication(sys.argv)
     window = MainWindow()
