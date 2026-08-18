@@ -246,4 +246,13 @@ class RoiFrameView(QLabel):
                 self._redraw()
                 self.roi_changed.emit(self._draw_mode, roi)
             else:
-                self._redraw()  # erase the aborted drag rect
+                # Aborted drag (accidental click): the press cleared the
+                # active ROI — restore it from the pre-press snapshot so a
+                # stray click doesn't silently delete a selection.
+                if self._undo is not None:
+                    prev_orig, prev_disp = self._undo
+                    if self._draw_mode == "original":
+                        self._roi_original = prev_orig
+                    else:
+                        self._roi_display = prev_disp
+                self._redraw()
