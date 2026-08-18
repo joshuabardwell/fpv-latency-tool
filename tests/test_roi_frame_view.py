@@ -55,6 +55,17 @@ class TestRoiDrawing:
         assert view.get_roi("display") is not None
         assert view.get_roi("original") is None
 
+    def test_aborted_click_clears_undo_slot(self, qtbot):
+        """Regression: after an abort-restore, a leftover undo snapshot made
+        Ctrl+Z a no-op that still invalidated the caller's results."""
+        view = make_view(qtbot)
+        prev = ROI(10, 10, 50, 30)
+        view.set_roi("original", prev)
+        view.draw_mode = "original"
+        drag(qtbot, view, 200, 250, 202, 251)  # aborted click
+        assert view.undo_roi() is False
+        assert view.get_roi("original") == prev
+
     def test_undo_restores_previous_state(self, qtbot):
         view = make_view(qtbot)
         first = ROI(10, 10, 50, 30)
