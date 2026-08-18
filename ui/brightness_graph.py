@@ -136,21 +136,19 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._line_orig.setData(x=x, y=orig.astype(np.float64))
         self._line_disp.setData(x=x, y=disp.astype(np.float64))
 
-        thresh_o = (float(orig.min()) + float(orig.max())) / 2 if len(orig) > 1 else 128.0
-        thresh_d = (float(disp.min()) + float(disp.max())) / 2 if len(disp) > 1 else 128.0
+        orig_min, orig_max = float(orig.min()), float(orig.max())
+        disp_min, disp_max = float(disp.min()), float(disp.max())
+
+        thresh_o = (orig_min + orig_max) / 2 if len(orig) > 1 else 128.0
+        thresh_d = (disp_min + disp_max) / 2 if len(disp) > 1 else 128.0
         self._thresh_orig_line.setValue(thresh_o)
         self._thresh_disp_line.setValue(thresh_d)
         self._thresh_orig_line.setVisible(True)
         self._thresh_disp_line.setVisible(True)
 
-        combined_range = (
-            max(float(orig.max()), float(disp.max()))
-            - min(float(orig.min()), float(disp.min()))
-        )
-        self._delta = max(5.0, 0.1 * combined_range)
-
-        ymin = min(float(orig.min()), float(disp.min()))
-        ymax = max(float(orig.max()), float(disp.max()))
+        ymin = min(orig_min, disp_min)
+        ymax = max(orig_max, disp_max)
+        self._delta = max(5.0, 0.1 * (ymax - ymin))
         self._ydata_min = ymin
         self._ydata_max = ymax
         self.setYRange(ymin, ymax, padding=0.1)

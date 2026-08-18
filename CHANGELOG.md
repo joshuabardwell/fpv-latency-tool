@@ -7,6 +7,9 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 ### Fixed
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 
+### Changed
+- `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
+
 ## v0.2.2
 
 Findings from a third audit round (fresh code pass over previously uncovered paths, plus a full docs-vs-code consistency check).
