@@ -2,6 +2,8 @@
 
 Measures glass-to-glass latency by analyzing a video that captures two screens side by side: the original signal source and the delayed display (e.g. FPV goggles). The tool detects light/dark transitions in each screen's region, pairs them, and reports the timing offset.
 
+![A camera films the signal source and the FPV goggles at once; the tool finds the flash transition in each screen region and converts the frame offset into milliseconds](assets/measurement-concept.svg)
+
 ## Features
 
 - **Video scrubbing** — frame-accurate seek with playhead, in/out point markers, play/pause
@@ -93,3 +95,7 @@ fpv-latency-tool/
 │   └── timeline.py           # playhead + in/out handle widget
 └── tests/                    # pytest suite (runs headless, see conftest.py)
 ```
+
+Data flow through the modules (see [DESIGN.md](DESIGN.md) for the full picture):
+
+![Data flow: video file through VideoReader, ROI selection, brightness extraction, transition detection and pairing, to the results table and CSV export](assets/architecture.svg)
