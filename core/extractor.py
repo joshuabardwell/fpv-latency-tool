@@ -74,6 +74,16 @@ class BrightnessExtractor(QThread):
                     return
 
                 ok, frame = cap.read()
+                if ok and i == 0:
+                    # Container metadata can lie about dimensions (rotation
+                    # side-data on phone footage is the classic case), and the
+                    # ROIs were clipped against that metadata. Re-clip against
+                    # the actually decoded size — an out-of-bounds slice would
+                    # be empty and its mean NaN, silently poisoning the whole
+                    # extraction.
+                    fh, fw = frame.shape[:2]
+                    ro = ro.clipped(fw, fh)
+                    rd = rd.clipped(fw, fh)
                 if not ok:
                     # Container frame counts routinely overestimate; salvage
                     # what was extracted instead of discarding the whole run.

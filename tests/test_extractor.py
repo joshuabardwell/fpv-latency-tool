@@ -84,6 +84,30 @@ class TestExtraction:
         assert first == 0
         assert len(orig) == len(disp) == SYNTH_FRAME_COUNT
 
+    def test_wrong_metadata_dimensions_never_yield_nan(self, synth_video, qapp):
+        """Regression: ROIs clipped against lying container metadata could
+        slice outside the decoded frame — empty region, NaN mean, silently
+        poisoned results downstream."""
+        ex = BrightnessExtractor(
+            path=str(synth_video),
+            in_point=0,
+            out_point=9,
+            # Claimed frame size 2x the real one; ROI valid for the claim,
+            # fully outside the real decoded width.
+            roi_original=ROI(SYNTH_W + 10, 2, 20, 20),
+            roi_display=ROI(2, 2, 20, 20),
+            frame_w=SYNTH_W * 2,
+            frame_h=SYNTH_H * 2,
+        )
+        results, errors = [], []
+        ex.extraction_done.connect(lambda o, d, f: results.append((o, d)))
+        ex.error.connect(errors.append)
+        ex.run()
+        assert errors == []
+        orig, disp = results[0]
+        assert not np.isnan(orig).any()
+        assert not np.isnan(disp).any()
+
     def test_unreadable_path_emits_error(self, tmp_path, qapp):
         results, errors, _ = run_extractor(tmp_path / "missing.mp4", 0, 10, qapp)
         assert results == []
