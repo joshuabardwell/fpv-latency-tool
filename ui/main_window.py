@@ -85,7 +85,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Glass-to-Glass Latency Tool")
         self.resize(1400, 750)
-        self.showMaximized()
+        self.show()
+        # On multi-monitor Windows setups, showMaximized()'s automatic
+        # geometry calculation can be stale/wrong even after show(), leaving
+        # a window that reports WindowMaximized without filling the screen.
+        # Querying screen() after show() (so it reflects the monitor the
+        # window actually landed on) and setting geometry explicitly avoids
+        # relying on that calculation.
+        self.setWindowState(Qt.WindowState.WindowMaximized)
+        screen = self.screen()
+        if screen is not None:
+            self.setGeometry(screen.availableGeometry())
 
         self.reader: VideoReader | None = None
         self._current_frame: np.ndarray | None = None
