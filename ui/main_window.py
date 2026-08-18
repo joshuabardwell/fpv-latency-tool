@@ -23,7 +23,6 @@ import sys
 
 import cv2
 import numpy as np
-import pandas as pd
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
@@ -48,6 +47,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
 from core.roi import ROI
 from core.video_io import VideoReader
@@ -861,18 +861,7 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith(".csv"):
             path += ".csv"
-        rows = [
-            {
-                "#": i,
-                "Original Frame": p.orig_frame,
-                "Display Frame": p.disp_frame,
-                "Direction": "Dark→Light" if p.polarity == "rising" else "Light→Dark",
-                "Latency (frames)": p.delta_frames(),
-                "Latency (ms)": round(p.delta_ms(fps), 2),
-            }
-            for i, p in enumerate(pairs, 1)
-        ]
-        pd.DataFrame(rows).to_csv(path, index=False)
+        write_pairs_csv(path, pairs, fps)
 
     def _update_pairs_label(self) -> None:
         pairs = self.brightness_graph.get_pairs()

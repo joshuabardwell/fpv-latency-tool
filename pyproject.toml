@@ -9,7 +9,6 @@ dependencies = [
     "PyQt6>=6.6",
     "opencv-python-headless>=4.9",
     "numpy>=1.26",
-    "pandas>=2.2",
     "pyqtgraph>=0.13",
 ]
 
