@@ -26,59 +26,13 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from core.detection import apply_min_spacing, find_falling, find_rising
 from core.latency import LatencyPair, pair_transitions
 
 _GREEN  = (0, 230, 0)
 _AMBER  = (255, 160, 0)
 _YELLOW = (255, 204, 0)
 _RED    = (220, 50, 50)
-
-
-# ------------------------------------------------------------------ helpers
-
-def _collapse_peaks(candidates: np.ndarray, diff: np.ndarray, sign: int) -> list[int]:
-    """Group consecutive candidate diff-indices; return frame of steepest change per group.
-    diff[i] = data[i+1]-data[i], so transition frame = diff_index + 1."""
-    if len(candidates) == 0:
-        return []
-    result = []
-    group = [candidates[0]]
-    for i in range(1, len(candidates)):
-        if candidates[i] == candidates[i - 1] + 1:
-            group.append(candidates[i])
-        else:
-            best = group[int(np.argmax(sign * diff[group]))]
-            result.append(int(best) + 1)
-            group = [candidates[i]]
-    best = group[int(np.argmax(sign * diff[group]))]
-    result.append(int(best) + 1)
-    return result
-
-
-def _find_rising_deriv(data: np.ndarray, delta: float) -> list[int]:
-    if len(data) < 2:
-        return []
-    diff = np.diff(data.astype(np.float64))
-    candidates = np.where(diff >= delta)[0]
-    return _collapse_peaks(candidates, diff, sign=1)
-
-
-def _find_falling_deriv(data: np.ndarray, delta: float) -> list[int]:
-    if len(data) < 2:
-        return []
-    diff = np.diff(data.astype(np.float64))
-    candidates = np.where(diff <= -delta)[0]
-    return _collapse_peaks(candidates, diff, sign=-1)
-
-
-def _apply_min_spacing(frames: list[int], min_spacing: int) -> list[int]:
-    if min_spacing <= 1 or not frames:
-        return frames
-    result = [frames[0]]
-    for f in frames[1:]:
-        if f - result[-1] >= min_spacing:
-            result.append(f)
-    return result
 
 
 # ------------------------------------------------------------------ widget
@@ -233,11 +187,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
     def clear_data(self) -> None:
         self._orig_data = self._disp_data = None
         self._transition_frames = []
-        self._rise_orig_frames = self._fall_orig_frames = []
-        self._rise_disp_frames = self._fall_disp_frames = []
-        self._rise_pairs = self._fall_pairs = []
-        self._rise_orig_unmatched = self._fall_orig_unmatched = []
-        self._rise_disp_unmatched = self._fall_disp_unmatched = []
+        # Fresh list per attribute — chained `a = b = []` would alias them.
+        self._rise_orig_frames, self._fall_orig_frames = [], []
+        self._rise_disp_frames, self._fall_disp_frames = [], []
+        self._rise_pairs, self._fall_pairs = [], []
+        self._rise_orig_unmatched, self._fall_orig_unmatched = [], []
+        self._rise_disp_unmatched, self._fall_disp_unmatched = [], []
         for item in (self._line_orig, self._line_disp):
             item.setData(x=[], y=[])
         for sc in (self._sc_rise_orig, self._sc_fall_orig,
@@ -304,14 +259,14 @@ class BrightnessGraphWidget(pg.PlotWidget):
 
     def _redetect(self) -> None:
         sp = self._min_spacing
-        self._rise_orig_frames = _apply_min_spacing(
-            [self._in_point + i for i in _find_rising_deriv(self._orig_data,  self._delta)], sp)
-        self._fall_orig_frames = _apply_min_spacing(
-            [self._in_point + i for i in _find_falling_deriv(self._orig_data, self._delta)], sp)
-        self._rise_disp_frames = _apply_min_spacing(
-            [self._in_point + i for i in _find_rising_deriv(self._disp_data,  self._delta)], sp)
-        self._fall_disp_frames = _apply_min_spacing(
-            [self._in_point + i for i in _find_falling_deriv(self._disp_data, self._delta)], sp)
+        self._rise_orig_frames = apply_min_spacing(
+            [self._in_point + i for i in find_rising(self._orig_data,  self._delta)], sp)
+        self._fall_orig_frames = apply_min_spacing(
+            [self._in_point + i for i in find_falling(self._orig_data, self._delta)], sp)
+        self._rise_disp_frames = apply_min_spacing(
+            [self._in_point + i for i in find_rising(self._disp_data,  self._delta)], sp)
+        self._fall_disp_frames = apply_min_spacing(
+            [self._in_point + i for i in find_falling(self._disp_data, self._delta)], sp)
 
         max_fr = self._max_latency if self._max_latency > 0 else None
         self._rise_pairs, self._rise_orig_unmatched, self._rise_disp_unmatched = \

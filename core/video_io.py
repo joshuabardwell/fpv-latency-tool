@@ -56,7 +56,7 @@ class VideoReader:
         # Defaults to the reported value until the user changes it in the UI.
         self.fps_effective = self._fps_reported
 
-        self._current_index = -1  # nothing decoded yet
+        self._next_index = -1  # frame the capture will decode next; -1 = unknown
 
     @property
     def metadata(self) -> VideoMetadata:
@@ -88,14 +88,14 @@ class VideoReader:
                 f"Frame index {index} out of range (0..{self._frame_count - 1})"
             )
 
-        if index != self._current_index:
+        if index != self._next_index:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, index)
 
         ok, frame = self._cap.read()
         if not ok:
             raise IOError(f"Failed to decode frame {index} from {self.path}")
 
-        self._current_index = index + 1  # cap auto-advances after read()
+        self._next_index = index + 1  # cap auto-advances after read()
         return frame
 
     def frame_to_timestamp(self, index: int) -> float:

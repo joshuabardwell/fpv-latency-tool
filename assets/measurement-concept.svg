@@ -1,0 +1,90 @@
+<svg viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-labelledby="ttl desc">
+  <title id="ttl">How glass-to-glass latency is measured</title>
+  <desc id="desc">A camera films the signal source screen and the FPV goggles at the same time; the tool finds the flash transition in each screen region of the footage and converts the frame offset into milliseconds.</desc>
+  <style>
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff; --surface: #f2f4f7; --surface-2: #e4e8ee;
+        --line: #8b93a3; --line-faint: #c9cfd9;
+        --ink: #1a1d23; --ink-muted: #5b6472;
+        --accent: #2f6f9f; --accent-soft: #dce9f4;
+        --warn: #a55a1e;
+      }
+    }
+    text { font-family: ui-sans-serif, system-ui, sans-serif; fill: var(--ink, #e6e9ee); }
+    .lbl  { font-size: 14px; font-weight: 600; }
+    .sub  { font-size: 12px; fill: var(--ink-muted, #98a1b0); }
+    .edge-lbl { font-size: 12px; fill: var(--ink-muted, #98a1b0); }
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+    .box  { fill: var(--surface, #1e2228); stroke: var(--line, #6d7686); stroke-width: 1.5; }
+    .box-accent { fill: var(--accent-soft, #1f3448); stroke: var(--accent, #5aa3d6); stroke-width: 1.5; }
+    .arrow { stroke: var(--line, #6d7686); stroke-width: 1.5; fill: none; }
+  </style>
+
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--line, #6d7686)"/>
+    </marker>
+    <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--accent, #5aa3d6)"/>
+    </marker>
+  </defs>
+
+  <!-- the canvas: first drawable element, covers the viewBox -->
+  <rect x="0" y="0" width="800" height="500" fill="var(--bg, #14161a)"/>
+
+  <!-- ── top: the physical setup ──────────────────────────────────── -->
+  <text class="lbl" x="136" y="44" text-anchor="middle">Signal source</text>
+  <g>
+    <rect class="box" x="48" y="60" width="176" height="96" rx="6"/>
+    <rect class="box-accent" x="124" y="76" width="24" height="24" rx="3"/>
+    <text class="sub" x="136" y="134" text-anchor="middle">flash: ON</text>
+  </g>
+
+  <text class="lbl" x="664" y="44" text-anchor="middle">FPV goggles</text>
+  <g>
+    <rect class="box" x="576" y="60" width="176" height="96" rx="6"/>
+    <rect x="652" y="76" width="24" height="24" rx="3"
+          fill="var(--surface-2, #272c34)" stroke="var(--line, #6d7686)" stroke-width="1.5"/>
+    <text class="sub" x="664" y="134" text-anchor="middle">flash: still OFF</text>
+  </g>
+
+  <line class="arrow" x1="226" y1="108" x2="572" y2="108" marker-end="url(#ah)"/>
+  <text class="edge-lbl" x="400" y="94" text-anchor="middle">video link — latency under test</text>
+
+  <g>
+    <line x1="348" y1="198" x2="160" y2="158" stroke="var(--line-faint, #3a414c)"
+          stroke-width="1" stroke-dasharray="3 3"/>
+    <line x1="452" y1="198" x2="640" y2="158" stroke="var(--line-faint, #3a414c)"
+          stroke-width="1" stroke-dasharray="3 3"/>
+    <rect class="box" x="308" y="200" width="184" height="44" rx="6"/>
+    <text class="lbl" x="400" y="222" text-anchor="middle" dominant-baseline="central">high-speed camera</text>
+    <text class="sub" x="400" y="262" text-anchor="middle">films both screens in one shot, ≥120 fps</text>
+  </g>
+
+  <line x1="40" y1="286" x2="760" y2="286" stroke="var(--line-faint, #3a414c)" stroke-width="1"/>
+
+  <!-- ── bottom: what the tool extracts from the footage ──────────── -->
+  <text class="sub" x="48" y="310">In the footage: per-frame brightness of each screen region</text>
+
+  <text class="sub" x="124" y="348" text-anchor="end">source</text>
+  <path d="M 140 364 H 320 V 332 H 716" fill="none"
+        stroke="var(--line, #6d7686)" stroke-width="2"/>
+
+  <text class="sub" x="124" y="420" text-anchor="end">goggles</text>
+  <path d="M 140 436 H 420 V 404 H 716" fill="none"
+        stroke="var(--line, #6d7686)" stroke-width="2"/>
+
+  <line x1="320" y1="328" x2="320" y2="466" stroke="var(--line-faint, #3a414c)"
+        stroke-width="1" stroke-dasharray="4 4"/>
+  <line x1="420" y1="400" x2="420" y2="466" stroke="var(--line-faint, #3a414c)"
+        stroke-width="1" stroke-dasharray="4 4"/>
+
+  <line x1="324" y1="460" x2="416" y2="460" stroke="var(--accent, #5aa3d6)"
+        stroke-width="1.5" marker-start="url(#ah-accent)" marker-end="url(#ah-accent)"/>
+  <text class="edge-lbl" x="436" y="460" dominant-baseline="central"
+        fill="var(--accent, #5aa3d6)">glass-to-glass latency = Δframes ÷ camera fps</text>
+</svg>

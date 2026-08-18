@@ -1,0 +1,92 @@
+<svg
+ viewBox="0.00 0.00 358.00 763.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" role="img" aria-labelledby="dotsvg-title">
+<title id="dotsvg-title">Data flow: video file through VideoReader, ROI selection, brightness extraction, transition detection and pairing, to the results table and CSV export</title>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 759.37)">
+<title>G</title>
+<polygon fill="#14161a" stroke="none" points="-4,4 -4,-759.37 353.63,-759.37 353.63,4 -4,4"/>
+<g id="node1" class="node">
+<title>file</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M198.81,-755.37C198.81,-755.37 130.38,-755.37 130.38,-755.37 124.38,-755.37 118.38,-749.37 118.38,-743.37 118.38,-743.37 118.38,-730.71 118.38,-730.71 118.38,-724.71 124.38,-718.71 130.38,-718.71 130.38,-718.71 198.81,-718.71 198.81,-718.71 204.81,-718.71 210.81,-724.71 210.81,-730.71 210.81,-730.71 210.81,-743.37 210.81,-743.37 210.81,-749.37 204.81,-755.37 198.81,-755.37"/>
+<text xml:space="preserve" text-anchor="middle" x="164.59" y="-732.94" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">video file</text>
+</g>
+<g id="node2" class="node">
+<title>reader</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M153.68,-654.46C153.68,-654.46 39.5,-654.46 39.5,-654.46 33.5,-654.46 27.5,-648.46 27.5,-642.46 27.5,-642.46 27.5,-613.3 27.5,-613.3 27.5,-607.3 33.5,-601.3 39.5,-601.3 39.5,-601.3 153.68,-601.3 153.68,-601.3 159.68,-601.3 165.68,-607.3 165.68,-613.3 165.68,-613.3 165.68,-642.46 165.68,-642.46 165.68,-648.46 159.68,-654.46 153.68,-654.46"/>
+<text xml:space="preserve" text-anchor="middle" x="96.59" y="-632.03" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">VideoReader</text>
+<text xml:space="preserve" text-anchor="middle" x="96.59" y="-615.53" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">core/video_io.py</text>
+</g>
+<g id="edge1" class="edge">
+<title>file&#45;&gt;reader</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M121.08,-718C111.31,-711.8 102.19,-703.8 96.59,-693.71 91.8,-685.09 90.29,-674.78 90.38,-664.95"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="93.16,-665.23 90.84,-657.08 87.57,-664.9 93.16,-665.23"/>
+<text xml:space="preserve" text-anchor="middle" x="152.09" y="-682.31" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">frame&#45;index seeks</text>
+</g>
+<g id="node4" class="node">
+<title>extractor</title>
+<path fill="#1f3448" stroke="#5aa3d6" stroke-width="1.5" d="M260.68,-405.39C260.68,-405.39 62.5,-405.39 62.5,-405.39 56.5,-405.39 50.5,-399.39 50.5,-393.39 50.5,-393.39 50.5,-364.23 50.5,-364.23 50.5,-358.23 56.5,-352.23 62.5,-352.23 62.5,-352.23 260.68,-352.23 260.68,-352.23 266.68,-352.23 272.68,-358.23 272.68,-364.23 272.68,-364.23 272.68,-393.39 272.68,-393.39 272.68,-399.39 266.68,-405.39 260.68,-405.39"/>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-382.96" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">BrightnessExtractor</text>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-366.46" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">core/extractor.py — QThread</text>
+</g>
+<g id="edge4" class="edge">
+<title>file&#45;&gt;extractor</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M192.19,-717.97C199.94,-711.35 207.39,-703.14 211.59,-693.71 259.18,-586.79 256.06,-538.64 211.59,-430.39 209.1,-424.33 205.49,-418.61 201.34,-413.34"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="203.68,-411.77 196.32,-407.57 199.46,-415.45 203.68,-411.77"/>
+<text xml:space="preserve" text-anchor="middle" x="297.88" y="-564.9" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">own capture,</text>
+<text xml:space="preserve" text-anchor="middle" x="297.88" y="-550.65" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">one forward pass</text>
+</g>
+<g id="node3" class="node">
+<title>view</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M171.18,-522.8C171.18,-522.8 12,-522.8 12,-522.8 6,-522.8 0,-516.8 0,-510.8 0,-510.8 0,-481.64 0,-481.64 0,-475.64 6,-469.64 12,-469.64 12,-469.64 171.18,-469.64 171.18,-469.64 177.18,-469.64 183.18,-475.64 183.18,-481.64 183.18,-481.64 183.18,-510.8 183.18,-510.8 183.18,-516.8 177.18,-522.8 171.18,-522.8"/>
+<text xml:space="preserve" text-anchor="middle" x="91.59" y="-500.37" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">frame view + ROI drag</text>
+<text xml:space="preserve" text-anchor="middle" x="91.59" y="-483.87" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">ui/roi_frame_view.py</text>
+</g>
+<g id="edge2" class="edge">
+<title>reader&#45;&gt;view</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M95.58,-600.64C94.83,-581.31 93.81,-554.78 92.99,-533.43"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="95.79,-533.42 92.68,-525.54 90.19,-533.64 95.79,-533.42"/>
+<text xml:space="preserve" text-anchor="middle" x="134.29" y="-557.77" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">scrub frames</text>
+</g>
+<g id="edge3" class="edge">
+<title>view&#45;&gt;extractor</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M97,-469.12C100.27,-456.8 105.22,-442.24 112.34,-430.39 115.94,-424.39 120.38,-418.56 125.11,-413.11"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="126.91,-415.29 130.26,-407.5 122.79,-411.5 126.91,-415.29"/>
+<text xml:space="preserve" text-anchor="middle" x="159.97" y="-433.24" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">ROIs (frame px)</text>
+</g>
+<g id="node5" class="node">
+<title>detect</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M230.68,-287.98C230.68,-287.98 92.5,-287.98 92.5,-287.98 86.5,-287.98 80.5,-281.98 80.5,-275.98 80.5,-275.98 80.5,-246.82 80.5,-246.82 80.5,-240.82 86.5,-234.82 92.5,-234.82 92.5,-234.82 230.68,-234.82 230.68,-234.82 236.68,-234.82 242.68,-240.82 242.68,-246.82 242.68,-246.82 242.68,-275.98 242.68,-275.98 242.68,-281.98 236.68,-287.98 230.68,-287.98"/>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-265.55" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">transition detection</text>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-249.05" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">core/detection.py</text>
+</g>
+<g id="edge5" class="edge">
+<title>extractor&#45;&gt;detect</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M161.59,-351.62C161.59,-335.83 161.59,-315.5 161.59,-298.24"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="164.39,-298.6 161.59,-290.6 158.79,-298.6 164.39,-298.6"/>
+<text xml:space="preserve" text-anchor="middle" x="212.97" y="-315.83" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">brightness arrays</text>
+</g>
+<g id="node6" class="node">
+<title>pair</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M216.43,-170.57C216.43,-170.57 106.75,-170.57 106.75,-170.57 100.75,-170.57 94.75,-164.57 94.75,-158.57 94.75,-158.57 94.75,-129.41 94.75,-129.41 94.75,-123.41 100.75,-117.41 106.75,-117.41 106.75,-117.41 216.43,-117.41 216.43,-117.41 222.43,-117.41 228.43,-123.41 228.43,-129.41 228.43,-129.41 228.43,-158.57 228.43,-158.57 228.43,-164.57 222.43,-170.57 216.43,-170.57"/>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-148.14" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">pair_transitions</text>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-131.64" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">core/latency.py</text>
+</g>
+<g id="edge6" class="edge">
+<title>detect&#45;&gt;pair</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M161.59,-234.21C161.59,-218.42 161.59,-198.09 161.59,-180.83"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="164.39,-181.19 161.59,-173.19 158.79,-181.19 164.39,-181.19"/>
+<text xml:space="preserve" text-anchor="middle" x="212.97" y="-198.42" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">transition frames</text>
+</g>
+<g id="node7" class="node">
+<title>results</title>
+<path fill="#1e2228" stroke="#6d7686" stroke-width="1.5" d="M293.31,-53.16C293.31,-53.16 29.88,-53.16 29.88,-53.16 23.88,-53.16 17.88,-47.16 17.88,-41.16 17.88,-41.16 17.88,-12 17.88,-12 17.88,-6 23.88,0 29.88,0 29.88,0 293.31,0 293.31,0 299.31,0 305.31,-6 305.31,-12 305.31,-12 305.31,-41.16 305.31,-41.16 305.31,-47.16 299.31,-53.16 293.31,-53.16"/>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-30.73" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">graph + table + CSV</text>
+<text xml:space="preserve" text-anchor="middle" x="161.59" y="-14.23" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13.00" fill="#e6e9ee">ui/brightness_graph.py, core/export.py</text>
+</g>
+<g id="edge7" class="edge">
+<title>pair&#45;&gt;results</title>
+<path fill="none" stroke="#6d7686" stroke-width="1.4" d="M161.59,-116.8C161.59,-101.01 161.59,-80.68 161.59,-63.42"/>
+<polygon fill="#6d7686" stroke="#6d7686" stroke-width="1.4" points="164.39,-63.78 161.59,-55.78 158.79,-63.78 164.39,-63.78"/>
+<text xml:space="preserve" text-anchor="middle" x="199.84" y="-81.01" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12.00" fill="#98a1b0">latency pairs</text>
+</g>
+</g>
+</svg>
