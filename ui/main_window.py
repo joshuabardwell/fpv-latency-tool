@@ -722,7 +722,7 @@ class MainWindow(QMainWindow):
             frame_h=meta.height,
         )
         self._extractor.progress.connect(self._on_extract_progress)
-        self._extractor.finished.connect(self._on_extract_finished)
+        self._extractor.extraction_done.connect(self._on_extract_finished)
         self._extractor.error.connect(self._on_extract_error)
 
         self.progress_bar.setValue(0)
