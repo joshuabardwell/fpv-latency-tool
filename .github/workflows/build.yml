@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Qt without a display server — same setup the test suite uses locally.
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libglib2.0-0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync -p 3.12
+
+      - name: Run tests
+        run: uv run pytest -q
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: fpv-latency-tool-windows
+            binary: dist/fpv-latency-tool.exe
+          - os: ubuntu-latest
+            artifact: fpv-latency-tool-linux
+            binary: dist/fpv-latency-tool
+          - os: macos-latest
+            artifact: fpv-latency-tool-macos
+            binary: dist/fpv-latency-tool
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libglib2.0-0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync -p 3.12
+
+      - name: Build binary
+        run: uv run pyinstaller --clean --noconfirm main.spec
+
+      - name: Smoke-test binary
+        # --help exits before the GUI starts, so it works headless.
+        run: ${{ matrix.binary }} --help
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+
+  release:
+    # Tag a commit vX.Y.Z to publish the binaries as a GitHub release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename artifacts for release
+        run: |
+          mkdir release
+          mv artifacts/fpv-latency-tool-windows/fpv-latency-tool.exe release/fpv-latency-tool-windows.exe
+          mv artifacts/fpv-latency-tool-linux/fpv-latency-tool release/fpv-latency-tool-linux
+          mv artifacts/fpv-latency-tool-macos/fpv-latency-tool release/fpv-latency-tool-macos
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
