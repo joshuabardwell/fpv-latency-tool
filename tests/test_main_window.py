@@ -110,6 +110,69 @@ class TestRoiInvalidation:
         assert not loaded.export_csv_btn.isEnabled()
 
 
+class TestSessionInvalidation:
+    def test_stale_result_from_old_session_dropped(self, loaded, qtbot):
+        """Regression: a queued extraction_done from an invalidated session
+        (file re-opened, analysis restarted) used to overwrite the current
+        session's results."""
+        import numpy as np
+
+        analyze(loaded, qtbot)
+        assert loaded._results_model.rowCount() == 2
+        stale = np.zeros(5, dtype=np.float32)
+        loaded._on_extract_finished(
+            stale, stale, 0, session=loaded._extraction_session - 1
+        )
+        assert loaded.brightness_graph._n == 40  # untouched
+        assert loaded._results_model.rowCount() == 2
+
+    def test_roi_change_mid_analysis_discards_results(self, loaded, qtbot):
+        """Regression: editing an ROI while extraction ran left results for
+        the old ROI on screen under the new ROI's overlay."""
+        loaded._on_analyze_clicked()
+        loaded.frame_view.set_roi(
+            "original", ROI(1, 1, SYNTH_W // 2 - 2, SYNTH_H - 2)
+        )
+        qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
+        assert loaded.brightness_graph.get_pairs() == []
+        assert loaded._results_model.rowCount() == 0
+        assert not loaded.export_csv_btn.isEnabled()
+
+    def test_failed_open_preserves_session(self, loaded, qtbot):
+        """Regression: a bad path released the current reader before failing,
+        bricking scrubbing and wiping results."""
+        analyze(loaded, qtbot)
+        frames_before = loaded.reader.frame_count
+        loaded.open_file("/nonexistent/nope.mp4")
+        assert "Error" in loaded.status_label.text()
+        assert loaded.reader.frame_count == frames_before
+        assert loaded._results_model.rowCount() == 2
+        loaded.show_frame(5)  # reader still usable
+
+
+class TestCliCommand:
+    def test_min_delta_omitted_before_first_analysis(self, loaded):
+        """Regression: Show CLI printed the spinbox default (10), a threshold
+        the session never used."""
+        assert "--min-delta" not in loaded._build_cli_command()
+
+    def test_min_delta_included_after_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert f"--min-delta {loaded.delta_spin.value()}" in loaded._build_cli_command()
+
+    def test_out_of_bounds_cli_roi_warns(self, loaded):
+        """Regression: an ROI from a higher-res recording clipped to a 1px
+        sliver — possibly on the wrong screen — with no warning."""
+        args = SimpleNamespace(
+            fps=None, direction=None,
+            roi_original=(5000, 5000, 100, 100), roi_display=None,
+            min_delta=None, min_spacing=None, max_latency=None,
+            in_point=None, out_point=None,
+        )
+        loaded.apply_cli_args(args)
+        assert "Warning" in loaded.status_label.text()
+
+
 class TestKeyboardNavigation:
     def test_arrow_steps_frame_via_window(self, loaded, qtbot):
         assert loaded.timeline.current_frame == 0

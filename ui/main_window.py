@@ -108,6 +108,12 @@ class MainWindow(QMainWindow):
         self._brightness_display: np.ndarray | None = None
         self._extraction_in_point: int = 0
         self._extraction_requested: int = 0
+        # Monotonic token: bumped whenever extraction state is invalidated
+        # (new analysis, ROI change, file open). Worker signals carry the
+        # token they were started with; a mismatch means the payload belongs
+        # to a session that no longer exists and must be dropped — a queued
+        # cross-thread signal cannot be un-sent, only ignored.
+        self._extraction_session: int = 0
         self._delta_user_set: bool = False
         self._cli_args = None
 
@@ -467,18 +473,21 @@ class MainWindow(QMainWindow):
 
     def open_file(self, path: str) -> None:
         """Load a video file by path (used by the dialog and by CLI argument)."""
+        # Open the new file before tearing anything down: a bad path must
+        # leave the current session (reader, results) fully intact.
+        try:
+            new_reader = VideoReader(path)
+        except (FileNotFoundError, IOError) as e:
+            self.status_label.setText(f"Error: {e}")
+            return
+
         self._playback_timer.stop()
         self._stop_extractor()
         self._clear_brightness()
         self._delta_user_set = False
         if self.reader is not None:
             self.reader.release()
-
-        try:
-            self.reader = VideoReader(path)
-        except (FileNotFoundError, IOError) as e:
-            self.status_label.setText(f"Error: {e}")
-            return
+        self.reader = new_reader
 
         meta = self.reader.metadata
         self.file_label.setText(meta.path.name)
@@ -546,6 +555,14 @@ class MainWindow(QMainWindow):
         else:
             self.frame_view.draw_mode = None
 
+    def _cancel_running_extraction(self) -> None:
+        """An in-flight extraction samples ROIs that no longer exist —
+        cancel it, and bump the session so even an already-queued result
+        from it is dropped on delivery."""
+        if self._extractor is not None:
+            self._extractor.cancel()
+            self._extraction_session += 1
+
     def _on_clear_rois(self) -> None:
         self.frame_view.clear_rois()
         self.frame_view.draw_mode = None
@@ -553,11 +570,13 @@ class MainWindow(QMainWindow):
             btn.blockSignals(True)
             btn.setChecked(False)
             btn.blockSignals(False)
+        self._cancel_running_extraction()
         self._update_brightness()
         self._clear_brightness()
         self._update_analyze_button()
 
     def _on_roi_changed(self, name: str, roi) -> None:
+        self._cancel_running_extraction()
         self._update_brightness()
         self._clear_brightness()
         self._update_analyze_button()
@@ -674,6 +693,7 @@ class MainWindow(QMainWindow):
         # Same invalidation as a normal ROI edit — the restored ROIs make
         # any existing extraction stale.
         if self.frame_view.undo_roi():
+            self._cancel_running_extraction()
             self._update_brightness()
             self._clear_brightness()
             self._update_analyze_button()
@@ -756,9 +776,14 @@ class MainWindow(QMainWindow):
             frame_w=meta.width,
             frame_h=meta.height,
         )
-        self._extractor.progress.connect(self._on_extract_progress)
-        self._extractor.extraction_done.connect(self._on_extract_finished)
-        self._extractor.error.connect(self._on_extract_error)
+        self._extraction_session += 1
+        sess = self._extraction_session
+        self._extractor.progress.connect(
+            lambda done, total, s=sess: self._on_extract_progress(done, total, s))
+        self._extractor.extraction_done.connect(
+            lambda o, d, f, s=sess: self._on_extract_finished(o, d, f, s))
+        self._extractor.error.connect(
+            lambda msg, s=sess: self._on_extract_error(msg, s))
         # Built-in QThread.finished: fires when the thread has actually
         # exited, on every path (completed, cancelled, errored) — the one
         # place Analyze can safely be re-enabled.
@@ -781,12 +806,22 @@ class MainWindow(QMainWindow):
         self.analysis_widget.hide()
         self._update_analyze_button()
 
-    def _on_extract_progress(self, done: int, total: int) -> None:
+    def _on_extract_progress(self, done: int, total: int, session: int | None = None) -> None:
+        if session is not None and session != self._extraction_session:
+            return
         pct = round(100 * done / total) if total > 0 else 0
         self.progress_bar.setValue(pct)
         self.status_label.setText(f"Analyzing… {done} / {total} frames ({pct}%)")
 
-    def _on_extract_finished(self, orig: np.ndarray, disp: np.ndarray, first_frame: int) -> None:
+    def _on_extract_finished(
+        self, orig: np.ndarray, disp: np.ndarray, first_frame: int,
+        session: int | None = None,
+    ) -> None:
+        # A queued delivery from an invalidated session (different file
+        # opened, ROIs changed, analysis restarted) would populate results
+        # that belong to state which no longer exists.
+        if session is not None and session != self._extraction_session:
+            return
         self._brightness_original = orig
         self._brightness_display = disp
         self._extraction_in_point = first_frame
@@ -916,12 +951,26 @@ class MainWindow(QMainWindow):
             idx = self.polarity_combo.findData(args.direction)
             if idx >= 0:
                 self.polarity_combo.setCurrentIndex(idx)
-        if args.roi_original is not None:
-            x, y, w, h = args.roi_original
-            self.frame_view.set_roi("original", ROI(x, y, w, h))
-        if args.roi_display is not None:
-            x, y, w, h = args.roi_display
-            self.frame_view.set_roi("display", ROI(x, y, w, h))
+        oob: list[str] = []
+        for name, arg in (("original", args.roi_original), ("display", args.roi_display)):
+            if arg is None:
+                continue
+            x, y, w, h = arg
+            self.frame_view.set_roi(name, ROI(x, y, w, h))
+            if self.reader is not None:
+                meta = self.reader.metadata
+                if x < 0 or y < 0 or x + w > meta.width or y + h > meta.height:
+                    oob.append(name)
+        if oob and self.reader is not None:
+            # A CLI ROI from a higher-res recording clips to a sliver at the
+            # frame edge — possibly sampling the wrong screen with no visual
+            # hint. Warn loudly instead of failing silently.
+            meta = self.reader.metadata
+            self.status_label.setText(
+                f"Warning: --roi-{' and --roi-'.join(oob)} extends outside the "
+                f"video frame ({meta.width}x{meta.height}) and will be clipped — "
+                f"check the ROI overlay before trusting results"
+            )
         if args.min_delta is not None:
             self.delta_spin.setValue(args.min_delta)
         if args.min_spacing is not None:
@@ -933,7 +982,7 @@ class MainWindow(QMainWindow):
         if args.out_point is not None:
             self.timeline.set_out_point(args.out_point)
 
-    def _on_show_cli(self) -> None:
+    def _build_cli_command(self) -> str:
         parts = ["python main.py"]
         if self.reader is not None:
             parts.append(f'"{self.reader.metadata.path}"')
@@ -943,12 +992,20 @@ class MainWindow(QMainWindow):
             if roi is not None:
                 parts.append(f"--roi-{name} {roi.x},{roi.y},{roi.width},{roi.height}")
         parts.append(f"--direction {self.polarity_combo.currentData()}")
-        parts.append(f"--min-delta {self.delta_spin.value()}")
+        # Before the first analysis the spinbox holds its widget default,
+        # which was never an effective threshold — printing it would force a
+        # threshold the current session never used. Only a value that has
+        # actually applied (post-analysis, or user-set) reproduces the run.
+        if self.delta_spin.isEnabled() or self._delta_user_set:
+            parts.append(f"--min-delta {self.delta_spin.value()}")
         parts.append(f"--min-spacing {self.spacing_spin.value()}")
         parts.append(f"--max-latency {self.max_latency_spin.value()}")
         parts.append(f"--in-point {self.timeline.in_point}")
         parts.append(f"--out-point {self.timeline.out_point}")
-        cmd = " ".join(parts)
+        return " ".join(parts)
+
+    def _on_show_cli(self) -> None:
+        cmd = self._build_cli_command()
 
         dlg = QDialog(self)
         dlg.setWindowTitle("CLI Options")
@@ -977,7 +1034,9 @@ class MainWindow(QMainWindow):
         self._delta_user_set = True
         self.brightness_graph.set_delta(float(value))
 
-    def _on_extract_error(self, msg: str) -> None:
+    def _on_extract_error(self, msg: str, session: int | None = None) -> None:
+        if session is not None and session != self._extraction_session:
+            return  # stale error from an invalidated session
         self.analysis_widget.hide()
         self.status_label.setText(f"Analysis error: {msg}")
 
@@ -1008,6 +1067,7 @@ class MainWindow(QMainWindow):
             self.export_csv_btn.setEnabled(False)
 
     def _stop_extractor(self) -> None:
+        self._extraction_session += 1  # drop anything already queued
         if self._extractor is not None and self._extractor.isRunning():
             self._extractor.cancel()
             self._extractor.wait()
