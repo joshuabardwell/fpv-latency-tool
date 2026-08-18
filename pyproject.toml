@@ -1,6 +1,6 @@
 [project]
 name = "fpv-latency-tool"
-version = "0.2.1"
+version = "0.2.2"
 description = "Glass-to-glass latency analyzer for FPV video systems"
 readme = "README.md"
 requires-python = ">=3.10"
