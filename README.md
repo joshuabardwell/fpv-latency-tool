@@ -6,14 +6,14 @@ Measures glass-to-glass latency by analyzing a video that captures two screens s
 
 ## Features
 
-- **Video scrubbing** — frame-accurate seek with playhead, in/out point markers, play/pause
+- **Video scrubbing** — frame-indexed seek with playhead, in/out point markers, play/pause
 - **ROI selection** — click-and-drag rectangles over each screen; live mean-brightness readout updates as you scrub
 - **Brightness extraction** — runs in a background thread; progress bar with cancel
 - **Derivative-based transition detection** — finds rising and falling edges via per-frame brightness change; configurable min ΔBrightness, min spacing, and max latency window
 - **Transition pairing** — greedy nearest-following match; unmatched transitions highlighted red on the graph
-- **Results table** — transition #, display frame, output frame, direction, latency in frames and ms; click a row to jump to that frame; CSV export
+- **Results table** — transition #, original frame, display frame, direction, latency in frames and ms; click a row to jump to that frame; CSV export
 - **FPS verification** — measure the test pattern's periodicity and cross-check against the known period to compute the true frame rate
-- **CLI parameters** — pre-fill any setting from the command line for reproducible runs; "Show CLI Options" dialog copies the full command
+- **CLI parameters** — pre-fill settings from the command line for reproducible runs; "Show CLI Options" dialog copies the full command
 
 > **Detection limitation:** transitions are found where a *single*
 > frame-to-frame brightness step exceeds the Min ΔBrightness threshold. A slow
@@ -36,8 +36,8 @@ uv sync
 uv run main.py
 ```
 
-(Works the same on Windows, Linux, and macOS. Plain pip also works:
-`pip install .` then `python main.py`.)
+(Works the same on Windows, Linux, and macOS. Without uv: install the
+dependencies listed in `pyproject.toml` with pip, then `python main.py`.)
 
 Run the tests with:
 
@@ -123,8 +123,14 @@ python main.py [file]
 fpv-latency-tool/
 ├── main.py                   # entry point
 ├── pyproject.toml            # dependencies (managed with uv)
-├── main.spec                 # PyInstaller build spec (see BUILDING.md)
+├── main.spec                 # PyInstaller build spec
 ├── DESIGN.md                 # architecture reference
+├── BUILDING.md               # binary build instructions
+├── CHANGELOG.md
+├── CLAUDE.md                 # AI-agent instructions
+├── scripts/                  # local build scripts (Linux/macOS, Windows)
+├── assets/                   # README diagrams (SVG)
+├── .github/workflows/        # CI: tests + binaries on all 3 OSes
 ├── core/
 │   ├── detection.py          # derivative-based transition detection
 │   ├── export.py             # CSV export

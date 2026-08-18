@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.2
+
+Findings from a third audit round (fresh code pass over previously uncovered paths, plus a full docs-vs-code consistency check).
+
+### Fixed
+- Extraction re-clips ROIs against the actually decoded frame size — container metadata lying about dimensions (rotation side-data on phone footage) could yield an empty ROI slice whose NaN mean silently poisoned all results.
+- README corrections: results-table column wording, false `pip install .` claim, incomplete project-layout tree, "frame-accurate"/"any setting" overstatements; DESIGN.md delta-threshold nuance; stale "Step 2 UI" module docstring.
+
 ## v0.2.1
 
 Findings from two adversarial audit rounds over v0.2.0 (three parallel fresh-context reviews, each finding re-verified before fixing; a follow-up round then reviewed the fixes themselves and caught one gap they introduced).
@@ -31,7 +39,7 @@ Findings from two adversarial audit rounds over v0.2.0 (three parallel fresh-con
 - Same-frame transitions can pair (zero-frame latency was previously unmeasurable).
 - Extraction of a file shorter than its metadata claims keeps the extracted frames instead of discarding everything.
 - Unknown CLI options now error instead of being silently ignored.
-- CSV export appends `.csv` when no extension is given.
+- CSV export appends `.csv` when the filename doesn't already end with it.
 
 ### Changed
 - Packaging: uv + `pyproject.toml` replace `requirements.txt`; pandas dependency dropped (stdlib csv writes identical output).

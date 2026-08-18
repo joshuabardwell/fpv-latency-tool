@@ -1,21 +1,11 @@
 """
-Step 2 UI: ROI selection, live brightness readout, and an in/out-point
-timeline that lets the user restrict which portion of the video is analysed.
+Main window: wires the whole app together — video scrubbing with in/out
+points, ROI selection with live brightness readout, threaded brightness
+extraction, detection-parameter controls, results table, CSV export, and
+CLI argument handling.
 
-Controls:
-  - Drag the yellow playhead to scrub.
-  - Drag the white [ handle to set the in point.
-  - Drag the white ] handle to set the out point.
-  - Click anywhere on the track (away from a handle) to jump the playhead.
-  - << Prev / Next >> step one frame at a time.
-  - Space:  play / pause.
-  - I:      set in point at playhead.
-  - O:      set out point at playhead.
-  - Home:   jump playhead to in point.
-  - End:    jump playhead to out point.
-  - Ctrl+Z: undo last ROI change.
-  - F1 / ?: show keyboard-shortcut reference.
-  - Set Original / Display ROI: drag a rectangle on the frame.
+Keyboard shortcuts are listed in README.md and in the in-app help (F1 / ?).
+Architecture and data flow are described in DESIGN.md.
 """
 
 import argparse

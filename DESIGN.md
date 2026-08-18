@@ -100,8 +100,9 @@ single frame-to-frame brightness step exceeds delta. Consequences:
 - A slow multi-frame fade (LCD pixel response, exposure blending) where no
   single step crosses delta is **missed entirely**, even if the cumulative
   change is large. Lower delta or a faster test pattern edge is the workaround.
-- Delta is auto-set to 10 % of the combined brightness range (min 5) whenever
-  new data is loaded, and can be overridden.
+- Delta is auto-computed on new data (10 % of the combined brightness range,
+  min 5) only while the spinbox is untouched — a user-set or CLI threshold
+  survives re-analysis.
 - Min Spacing suppresses double-triggers on noisy edges; Max Latency bounds the
   pairing search window so a missed display transition doesn't chain-shift all
   later pairs.
