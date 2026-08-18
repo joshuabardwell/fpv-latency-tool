@@ -25,7 +25,9 @@ core/
   video_io.py             VideoReader: frame-accurate random access + metadata
   roi.py                  ROI dataclass: pixel rect, clipping, mean brightness
   extractor.py            BrightnessExtractor: QThread, sequential brightness pass
+  detection.py            derivative-based transition detection (pure NumPy)
   latency.py              LatencyPair + pair_transitions (greedy matching)
+  export.py               CSV export of latency pairs (stdlib csv)
 ui/
   main_window.py          MainWindow: layout, wiring, CLI args, CSV export
   roi_frame_view.py       RoiFrameView: frame display + click-drag ROI overlay
@@ -48,14 +50,16 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    *own* `cv2.VideoCapture` (never shares the GUI reader across threads), seeks
    to the in point once and reads sequentially — one forward pass, no per-frame
    seeking. Output: two float32 arrays (mean gray brightness per frame per ROI).
+   If the file ends before the metadata-reported frame count (common), the
+   frames extracted so far are delivered and the status line says so.
 4. **Detection** — `BrightnessGraphWidget.set_data` stores the arrays and runs
-   derivative-based detection: `np.diff` against a delta threshold, consecutive
+   `core.detection`: `np.diff` against a delta threshold, consecutive
    over-threshold frames collapsed to the steepest step. Detection re-runs live
    when the user changes Min ΔBrightness, Min Spacing, or Max Latency.
 5. **Pairing** — `pair_transitions` greedily matches each original transition to
-   the nearest following display transition of the same polarity (rising with
+   the nearest display transition at or after it (same polarity: rising with
    rising, falling with falling), one-to-one, optionally capped by Max Latency.
-   Unmatched transitions render red.
+   A same-frame match counts as zero latency. Unmatched transitions render red.
 6. **Results** — pairs feed the table, the mean/min/max summary, CSV export, and
    the FPS verification row (measured original-pattern period vs. user-entered
    known period → computed true fps).
@@ -66,8 +70,12 @@ Exactly two threads matter:
 
 - **GUI thread** — everything except extraction.
 - **Extractor thread** — `BrightnessExtractor.run`. Communicates only via queued
-  signals (`progress`, results, `error`). Cancellation is a plain boolean flag
-  polled once per frame; a Python bool store/load is atomic, no lock needed.
+  signals (`progress`, `extraction_done`, `error`). Cancellation is a plain
+  boolean flag polled once per frame; a Python bool store/load is atomic, no
+  lock needed. The result signal is deliberately *not* named `finished` — that
+  would shadow the built-in `QThread.finished`, which is the only signal that
+  fires on every exit path (completed, cancelled, errored) and is what the GUI
+  uses to re-enable controls and drop the worker reference.
 
 The GUI-side `VideoReader` and the extractor's capture are separate
 `cv2.VideoCapture` instances by design; OpenCV captures are not thread-safe.

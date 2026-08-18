@@ -13,13 +13,34 @@ Measures glass-to-glass latency by analyzing a video that captures two screens s
 - **FPS verification** — measure the test pattern's periodicity and cross-check against the known period to compute the true frame rate
 - **CLI parameters** — pre-fill any setting from the command line for reproducible runs; "Show CLI Options" dialog copies the full command
 
-## Setup
+> **Detection limitation:** transitions are found where a *single*
+> frame-to-frame brightness step exceeds the Min ΔBrightness threshold. A slow
+> fade spread over several frames (e.g. LCD pixel response) can be missed even
+> though the total change is large — lower the threshold or use a test pattern
+> with a hard edge. See DESIGN.md for details.
+
+## Download
+
+Prebuilt binaries (Windows exe, Linux, macOS) are produced by the CI workflow:
+grab them from the *Actions* tab of any run, or from *Releases* for tagged
+versions. See [BUILDING.md](BUILDING.md) to build one yourself.
+
+## Running from source
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
 ```bash
-python -m venv venv
-venv\Scripts\activate        # macOS/Linux: source venv/bin/activate
-pip install -r requirements.txt
-python main.py
+uv sync
+uv run main.py
+```
+
+(Works the same on Windows, Linux, and macOS. Plain pip also works:
+`pip install .` then `python main.py`.)
+
+Run the tests with:
+
+```bash
+uv run pytest
 ```
 
 ## Usage
@@ -53,17 +74,22 @@ python main.py [file]
 ## Project layout
 
 ```
-latency_app/
+fpv-latency-tool/
 ├── main.py                   # entry point
-├── requirements.txt
+├── pyproject.toml            # dependencies (managed with uv)
+├── main.spec                 # PyInstaller build spec (see BUILDING.md)
+├── DESIGN.md                 # architecture reference
 ├── core/
+│   ├── detection.py          # derivative-based transition detection
+│   ├── export.py             # CSV export
 │   ├── extractor.py          # QThread brightness extraction worker
 │   ├── latency.py            # LatencyPair dataclass + pairing algorithm
 │   ├── roi.py                # ROI dataclass: pixel coords + mean_brightness()
 │   └── video_io.py           # VideoReader: frame-accurate seeking, metadata
-└── ui/
-    ├── brightness_graph.py   # pyqtgraph brightness traces + transition markers
-    ├── main_window.py        # main window: controls, layout, wiring
-    ├── roi_frame_view.py     # click-drag ROI overlay on the video frame
-    └── timeline.py           # playhead + in/out handle widget
+├── ui/
+│   ├── brightness_graph.py   # pyqtgraph brightness traces + transition markers
+│   ├── main_window.py        # main window: controls, layout, wiring
+│   ├── roi_frame_view.py     # click-drag ROI overlay on the video frame
+│   └── timeline.py           # playhead + in/out handle widget
+└── tests/                    # pytest suite (runs headless, see conftest.py)
 ```
