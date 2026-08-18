@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed (second audit round)
+- Queued results/errors from an invalidated analysis session (file re-opened, ROI changed, analysis restarted) are dropped instead of overwriting the current session.
+- Opening an invalid path no longer destroys the current session — the new file is validated before the old one is torn down.
+- Editing or clearing an ROI mid-extraction cancels the in-flight run instead of showing old-ROI results under the new overlay.
+- An aborted ROI click no longer leaves a phantom undo that wiped results as a no-op.
+- Timeline in/out points stay pinned to frame 0 on single-frame videos.
+- "Show CLI Options" omits `--min-delta` until a threshold has actually been applied, and a warning appears when a CLI ROI lies outside the video frame.
+- Windows CI smoke test now waits for the GUI-subsystem exe and checks its exit code (it previously passed unconditionally).
+
 ### Fixed
 - Results table and CSV headers: original/display frame columns were swapped in name.
 - Analyze button no longer stays disabled after cancelling an analysis.
