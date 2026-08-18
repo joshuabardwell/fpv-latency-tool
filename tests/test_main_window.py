@@ -221,3 +221,18 @@ class TestKeyboardNavigation:
         loaded.show_frame(30)
         qtbot.keyClick(loaded, Qt.Key.Key_O)
         assert loaded.timeline.out_point == 30
+
+
+class TestStartupWindowState:
+    def test_starts_filling_available_screen_geometry(self, window):
+        """Regression: showMaximized()'s automatic geometry calculation could
+        report WindowMaximized while filling only ~2/3 of the screen on
+        multi-monitor Windows setups. Geometry is set explicitly from the
+        screen's available area; allow a little slack for window-frame/title
+        bar bookkeeping (varies by platform), which isn't the bug being
+        guarded against."""
+        avail = window.screen().availableGeometry()
+        geo = window.geometry()
+        assert window.windowState() & Qt.WindowState.WindowMaximized
+        assert abs(geo.width() - avail.width()) <= 10
+        assert abs(geo.height() - avail.height()) <= 10
