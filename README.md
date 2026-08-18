@@ -45,6 +45,50 @@ Run the tests with:
 uv run pytest
 ```
 
+## Recording good footage
+
+The measurement is only as good as the clip. What works:
+
+**Test pattern.** A full-screen, hard-edged black↔white flash with a known
+period — 1 Hz is a good default. Enter that period in the *Known period* field
+and the tool cross-checks your camera's real frame rate. Record 10+ flash
+cycles so the mean/min/max latency is statistics, not a single sample. A hard
+edge matters: detection triggers on a single frame-to-frame brightness step,
+so a pattern that fades misses (see the note above).
+
+**Camera.** Any phone with a slow-motion mode (120/240 fps) or an action cam
+(GoPro: 120/240 fps modes) works. Each frame is `1000 / fps` ms of measurement
+resolution — at 30 fps that is a coarse ±33 ms, at 240 fps ±4 ms. Settings
+that matter:
+
+- **Lock exposure, focus, and white balance** (tap-and-hold AE/AF lock on
+  phones, "lock" in GoPro Protune). Auto-exposure drifts ruin the brightness
+  traces.
+- Steady the camera — tripod or propped, not handheld.
+- Do **not** trust the file's reported fps for slow-motion clips; containers
+  frequently store the playback rate, not the capture rate. That is exactly
+  what the FPS verification row is for.
+
+**Framing.** Both screens fully visible in one shot, side by side
+*horizontally* rather than stacked — rolling-shutter cameras scan the frame
+top to bottom, so vertical separation adds a scan-time offset between the two
+regions. Film the goggle screen straight through the eyecup lens, focused,
+without glare.
+
+**The display you flash on.** Panel response time shapes the transition edge:
+
+| Panel | Suitability | Notes |
+|---|---|---|
+| OLED | best | near-instant pixel response, clean hard edges |
+| fast IPS | good | a few ms response, still a clear step |
+| VA | usable | slow response smears the edge over frames — lower *Min ΔBrightness* if transitions go undetected |
+| LCD/QLED with local dimming | usable | **disable local dimming** — backlight zones fade slowly and blur the edge |
+
+Set the monitor bright enough that the dark/light states are clearly separated
+in the footage, but not so bright the white clips or blooms. Avoid running the
+screen very dim: many backlights dim with PWM flicker, which beats against the
+camera frame rate and pollutes the brightness trace.
+
 ## Usage
 
 ```
