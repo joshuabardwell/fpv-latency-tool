@@ -79,11 +79,26 @@ jobs:
       - name: Build binary
         run: uv run pyinstaller --clean --noconfirm main.spec
 
-      - name: Smoke-test binary
+      - name: Smoke-test binary (Unix)
+        if: runner.os != 'Windows'
         # --help exits before the GUI starts, so it works headless.
         run: ${{ matrix.binary }} --help
         env:
           QT_QPA_PLATFORM: offscreen
+
+      - name: Smoke-test binary (Windows)
+        if: runner.os == 'Windows'
+        # The exe is a GUI-subsystem binary (console=False): the shell does
+        # not wait for it and its stdout is detached, so a plain invocation
+        # passes even if the exe crashes on startup. Start-Process -Wait
+        # plus the exit code is the real check.
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\fpv-latency-tool.exe" -ArgumentList "--help" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Write-Error "Smoke test failed with exit code $($p.ExitCode)"
+            exit $p.ExitCode
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
