@@ -181,6 +181,20 @@ class TestCliCommand:
         loaded.apply_cli_args(args)
         assert "Warning" in loaded.status_label.text()
 
+    def test_conflicting_in_out_points_warns(self, loaded):
+        """Regression: --out-point silently clamped to in_point+1 when it
+        conflicted with --in-point, with no indication it wasn't honoured."""
+        args = SimpleNamespace(
+            fps=None, direction=None,
+            roi_original=None, roi_display=None,
+            min_delta=None, min_spacing=None, max_latency=None,
+            in_point=30, out_point=20,
+        )
+        loaded.apply_cli_args(args)
+        assert loaded.timeline.out_point == 31
+        assert "Warning" in loaded.status_label.text()
+        assert "--out-point" in loaded.status_label.text()
+
 
 class TestKeyboardNavigation:
     def test_arrow_steps_frame_via_window(self, loaded, qtbot):

@@ -942,6 +942,7 @@ class MainWindow(QMainWindow):
             idx = self.polarity_combo.findData(args.direction)
             if idx >= 0:
                 self.polarity_combo.setCurrentIndex(idx)
+        warnings: list[str] = []
         oob: list[str] = []
         for name, arg in (("original", args.roi_original), ("display", args.roi_display)):
             if arg is None:
@@ -957,8 +958,8 @@ class MainWindow(QMainWindow):
             # frame edge — possibly sampling the wrong screen with no visual
             # hint. Warn loudly instead of failing silently.
             meta = self.reader.metadata
-            self.status_label.setText(
-                f"Warning: --roi-{' and --roi-'.join(oob)} extends outside the "
+            warnings.append(
+                f"--roi-{' and --roi-'.join(oob)} extends outside the "
                 f"video frame ({meta.width}x{meta.height}) and will be clipped — "
                 f"check the ROI overlay before trusting results"
             )
@@ -970,8 +971,23 @@ class MainWindow(QMainWindow):
             self.max_latency_spin.setValue(args.max_latency)
         if args.in_point is not None:
             self.timeline.set_in_point(args.in_point)
+            if self.timeline.in_point != args.in_point:
+                warnings.append(
+                    f"--in-point {args.in_point} is out of range and was "
+                    f"clamped to {self.timeline.in_point}"
+                )
         if args.out_point is not None:
             self.timeline.set_out_point(args.out_point)
+            if self.timeline.out_point != args.out_point:
+                # set_out_point floors at in_point + 1, so a conflicting
+                # --in-point/--out-point pair used to clamp silently to a
+                # different range than requested, with no indication.
+                warnings.append(
+                    f"--out-point {args.out_point} conflicts with the in "
+                    f"point and was clamped to {self.timeline.out_point}"
+                )
+        if warnings:
+            self.status_label.setText("Warning: " + "; ".join(warnings))
 
     def _build_cli_command(self) -> str:
         parts = ["python main.py"]
