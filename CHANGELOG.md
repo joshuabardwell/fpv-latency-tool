@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.2.1
 
-### Fixed (second audit round)
+Findings from two adversarial audit rounds over v0.2.0 (three parallel fresh-context reviews, each finding re-verified before fixing; a follow-up round then reviewed the fixes themselves and caught one gap they introduced).
+
+### Fixed
 - Queued results/errors from an invalidated analysis session (file re-opened, ROI changed, analysis restarted) are dropped instead of overwriting the current session.
 - Opening an invalid path no longer destroys the current session — the new file is validated before the old one is torn down.
 - Editing or clearing an ROI mid-extraction cancels the in-flight run instead of showing old-ROI results under the new overlay.
@@ -11,6 +13,11 @@
 - "Show CLI Options" omits `--min-delta` until a threshold has actually been applied, and a warning appears when a CLI ROI lies outside the video frame.
 - Windows CI smoke test now waits for the GUI-subsystem exe and checks its exit code (it previously passed unconditionally).
 - The Cancel button also invalidates the session, so a result finishing in the same instant can never populate a cancelled analysis.
+
+### Added
+- Project `CLAUDE.md` (agent instructions: stability contract, dependency direction, fix conventions).
+
+## v0.2.0
 
 ### Fixed
 - Results table and CSV headers: original/display frame columns were swapped in name.
