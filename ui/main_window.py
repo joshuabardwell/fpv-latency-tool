@@ -795,8 +795,9 @@ class MainWindow(QMainWindow):
         self._extractor.start()
 
     def _on_cancel_clicked(self) -> None:
-        if self._extractor is not None:
-            self._extractor.cancel()
+        # Bumps the session too: a result that finished in the instant
+        # before the click is already queued and must not land after it.
+        self._cancel_running_extraction()
         self.analysis_widget.hide()
 
     def _on_extractor_thread_exit(self) -> None:

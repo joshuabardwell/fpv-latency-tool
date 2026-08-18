@@ -59,6 +59,15 @@ class TestAnalysisLifecycle:
         qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
         assert loaded.analyze_btn.isEnabled()
 
+    def test_cancel_never_yields_results(self, loaded, qtbot):
+        """Regression: a result queued in the instant before Cancel was
+        clicked still populated the UI the user had just cancelled."""
+        loaded._on_analyze_clicked()
+        loaded._on_cancel_clicked()
+        qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
+        assert loaded.brightness_graph.get_pairs() == []
+        assert loaded._results_model.rowCount() == 0
+
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
         model = window._results_model

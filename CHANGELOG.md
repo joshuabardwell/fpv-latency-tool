@@ -10,6 +10,7 @@
 - Timeline in/out points stay pinned to frame 0 on single-frame videos.
 - "Show CLI Options" omits `--min-delta` until a threshold has actually been applied, and a warning appears when a CLI ROI lies outside the video frame.
 - Windows CI smoke test now waits for the GUI-subsystem exe and checks its exit code (it previously passed unconditionally).
+- The Cancel button also invalidates the session, so a result finishing in the same instant can never populate a cancelled analysis.
 
 ### Fixed
 - Results table and CSV headers: original/display frame columns were swapped in name.
