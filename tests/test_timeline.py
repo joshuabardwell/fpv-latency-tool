@@ -54,6 +54,17 @@ class TestTimeline:
         assert tl.current_frame == 42
         assert moved == []
 
+    def test_single_frame_video_pins_in_out(self, qtbot):
+        """Regression: set_out_point's +1 floor pushed out_point to 1 on a
+        1-frame video (only frame 0 exists), making extraction request a
+        frame past the end."""
+        tl = make_timeline(qtbot, frames=1)
+        tl.set_out_point(5)
+        tl.set_in_point(3)
+        assert (tl.in_point, tl.out_point) == (0, 0)
+        tl._apply_drag(50)
+        assert tl.current_frame == 0
+
     def test_set_frame_clamps(self, qtbot):
         tl = make_timeline(qtbot)
         tl.set_frame(1000)

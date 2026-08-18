@@ -96,6 +96,8 @@ class TimelineWidget(QWidget):
 
     def set_in_point(self, frame: int) -> None:
         """Set in point; pushes the playhead forward if it falls before the new in point."""
+        if self._frame_count <= 1:
+            return  # no room for a sub-range; reset() pinned both points to 0
         frame = max(0, min(frame, self._out_point - 1))
         if frame != self._in_point:
             self._in_point = frame
@@ -107,6 +109,8 @@ class TimelineWidget(QWidget):
 
     def set_out_point(self, frame: int) -> None:
         """Set out point; pulls the playhead back if it falls past the new out point."""
+        if self._frame_count <= 1:
+            return  # the +1 floor below would push out_point past the last frame
         frame = max(self._in_point + 1, min(frame, max(0, self._frame_count - 1)))
         if frame != self._out_point:
             self._out_point = frame
@@ -239,6 +243,8 @@ class TimelineWidget(QWidget):
         )
 
     def _apply_drag(self, x: int) -> None:
+        if self._frame_count <= 1:
+            return  # single-frame file: nothing to drag, clamps below misbehave
         frame = self._x_to_frame(x)
         if self._drag_target == "in":
             frame = max(0, min(frame, self._out_point - 1))
