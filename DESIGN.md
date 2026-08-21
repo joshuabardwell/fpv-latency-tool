@@ -105,7 +105,9 @@ single frame-to-frame brightness step exceeds delta. Consequences:
   survives re-analysis.
 - Min Spacing suppresses double-triggers on noisy edges; Max Latency bounds the
   pairing search window so a missed display transition doesn't chain-shift all
-  later pairs.
+  later pairs. Max Latency auto-computes to half the mean Original Period
+  after analysis (0/"unlimited" if fewer than 2 original transitions were
+  detected), following the same auto/user/CLI-override pattern as delta.
 
 ## Frame-accuracy caveats
 
