@@ -11,6 +11,9 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
 
+### Removed
+- The dashed horizontal lines on the brightness graph (drawn at each signal's min/max midpoint). They were never tied to the actual delta-based detection and could be mistaken for the real detection threshold.
+
 ## v0.2.2
 
 Findings from a third audit round (fresh code pass over previously uncovered paths, plus a full docs-vs-code consistency check).
