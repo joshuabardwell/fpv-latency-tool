@@ -90,10 +90,18 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # Connector lines linking paired orig→disp markers
         self._pair_connectors = self.plot(pen=pg.mkPen((200, 200, 200, 100), width=1))
 
-        # Playhead
-        self._playhead = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(_YELLOW, width=1))
-        self.addItem(self._playhead)
-        self._playhead.setVisible(False)
+        # Playhead: short thick stalk + triangle anchored to the bottom of
+        # the plot (mirrors TimelineWidget's own playhead shape) instead of
+        # a thin full-height line that gets lost once the graph is busy.
+        self._playhead_stalk = self.plot(x=[0, 0], y=[0, 0], pen=pg.mkPen(_YELLOW, width=3))
+        self._playhead_marker = pg.ScatterPlotItem(
+            x=[0], y=[0], pen=None, brush=pg.mkBrush(_YELLOW), size=16, symbol="t"
+        )
+        self.addItem(self._playhead_marker)
+        self._playhead_stalk.setVisible(False)
+        self._playhead_marker.setVisible(False)
+        self._playhead_y0 = 0.0
+        self._playhead_y1 = 0.0
 
         # Data state
         self._in_point  = 0
@@ -153,7 +161,13 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._ydata_max = ymax
         self.setYRange(ymin, ymax, padding=0.1)
         self.setXRange(in_point, in_point + len(orig) - 1, padding=0.01)
-        self._playhead.setVisible(True)
+
+        rng = ymax - ymin
+        pad = 0.1 * rng if rng > 0 else 1.0
+        self._playhead_y0 = ymin - pad
+        self._playhead_y1 = self._playhead_y0 + (0.12 * rng if rng > 0 else 1.0)
+        self._playhead_stalk.setVisible(True)
+        self._playhead_marker.setVisible(True)
 
         self._redetect()
         return self._delta
@@ -179,8 +193,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._apply_polarity()
 
     def set_frame(self, frame: int) -> None:
-        if self._playhead.isVisible():
-            self._playhead.setValue(frame)
+        if self._playhead_marker.isVisible():
+            self._playhead_stalk.setData(x=[frame, frame], y=[self._playhead_y0, self._playhead_y1])
+            self._playhead_marker.setData(x=[frame], y=[self._playhead_y0])
 
     def clear_data(self) -> None:
         self._orig_data = self._disp_data = None
@@ -200,7 +215,8 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._pair_connectors.setData(x=[], y=[])
         self._thresh_orig_line.setVisible(False)
         self._thresh_disp_line.setVisible(False)
-        self._playhead.setVisible(False)
+        self._playhead_stalk.setVisible(False)
+        self._playhead_marker.setVisible(False)
         self.setYRange(0, 255, padding=0.04)
         self._n = 0
         self.pairs_updated.emit()
