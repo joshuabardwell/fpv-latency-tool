@@ -7,6 +7,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 ### Fixed
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 - Startup window now sets its geometry explicitly from the screen's available area instead of relying on `showMaximized()`'s automatic calculation, fixing a multi-monitor Windows quirk where the window reported itself maximized without actually filling the screen.
+- Results table no longer steals keyboard focus on click, which was swallowing arrow-key/Home/End/I/O navigation shortcuts.
 
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
