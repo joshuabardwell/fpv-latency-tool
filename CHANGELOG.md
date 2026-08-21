@@ -10,6 +10,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
+- Brightness graph transition markers use a lighter shade than their line so they stay visible when the line gets noisy near a transition.
 
 ## v0.2.2
 

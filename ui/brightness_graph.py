@@ -34,6 +34,11 @@ _AMBER  = (255, 160, 0)
 _YELLOW = (255, 204, 0)
 _RED    = (220, 50, 50)
 
+# Lighter tints for transition markers, distinct from the line colors above
+# so a marker doesn't disappear into a noisy/jittery line of the same hue.
+_GREEN_MARKER = (64, 236, 64)
+_AMBER_MARKER = (255, 184, 64)
+
 
 # ------------------------------------------------------------------ widget
 
@@ -74,10 +79,10 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._thresh_disp_line.setVisible(False)
 
         # Transition scatter items: rising ▲ and falling ▼, per signal
-        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t")
-        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t2")
-        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t")
-        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t2")
+        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN_MARKER), size=9, symbol="t")
+        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN_MARKER), size=9, symbol="t2")
+        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER_MARKER), size=9, symbol="t")
+        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER_MARKER), size=9, symbol="t2")
         for sc in (self._sc_rise_orig, self._sc_fall_orig, self._sc_rise_disp, self._sc_fall_disp):
             self.addItem(sc)
 
