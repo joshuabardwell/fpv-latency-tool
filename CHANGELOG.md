@@ -5,7 +5,7 @@
 Findings from a fourth audit round, re-verified against this branch before fixing.
 
 ### Added
-- Luminance graph's playhead is now a triangle+stalk marker anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
+- Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
 
 ### Fixed
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
