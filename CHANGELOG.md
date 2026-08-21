@@ -5,6 +5,7 @@
 Findings from a fourth audit round, re-verified against this branch before fixing.
 
 ### Fixed
+- CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 - Startup window now sets its geometry explicitly from the screen's available area instead of relying on `showMaximized()`'s automatic calculation, fixing a multi-monitor Windows quirk where the window reported itself maximized without actually filling the screen.
 

@@ -5,6 +5,7 @@ Extraction runs the real QThread; tests wait for the built-in
 QThread.finished cleanup slot to clear MainWindow._extractor.
 """
 
+import argparse
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ from PyQt6.QtCore import Qt
 
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, _existing_file
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -194,6 +195,15 @@ class TestCliCommand:
         assert loaded.timeline.out_point == 31
         assert "Warning" in loaded.status_label.text()
         assert "--out-point" in loaded.status_label.text()
+
+    def test_cli_missing_file_rejected(self):
+        """Regression: a bad CLI filename must refuse to run, not launch the
+        GUI anyway with just a status-bar error."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            _existing_file("/nonexistent/nope.mp4")
+
+    def test_cli_existing_file_passes_through(self, synth_video):
+        assert _existing_file(synth_video) == synth_video
 
 
 class TestKeyboardNavigation:

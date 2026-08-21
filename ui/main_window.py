@@ -9,6 +9,7 @@ Architecture and data flow are described in DESIGN.md.
 """
 
 import argparse
+import os
 import sys
 
 import cv2
@@ -1111,9 +1112,15 @@ def _parse_roi(s: str):
         raise argparse.ArgumentTypeError(f"ROI must be x,y,w,h — got: {s!r}")
 
 
+def _existing_file(s: str) -> str:
+    if not os.path.exists(s):
+        raise argparse.ArgumentTypeError(f"video file not found: {s!r}")
+    return s
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Glass-to-Glass Latency Tool")
-    parser.add_argument("file",           nargs="?",         help="Video file to open")
+    parser.add_argument("file",           nargs="?", type=_existing_file, help="Video file to open")
     parser.add_argument("--fps",          type=float,        metavar="FLOAT")
     parser.add_argument("--roi-original", type=_parse_roi,   metavar="x,y,w,h")
     parser.add_argument("--roi-display",  type=_parse_roi,   metavar="x,y,w,h")
