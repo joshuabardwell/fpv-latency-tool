@@ -11,6 +11,9 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
 
+### Added
+- Esc now cancels a running analysis, same as clicking the Cancel button.
+
 ## v0.2.2
 
 Findings from a third audit round (fresh code pass over previously uncovered paths, plus a full docs-vs-code consistency check).

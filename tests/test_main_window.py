@@ -222,6 +222,13 @@ class TestKeyboardNavigation:
         qtbot.keyClick(loaded, Qt.Key.Key_O)
         assert loaded.timeline.out_point == 30
 
+    def test_escape_cancels_running_analysis(self, loaded, qtbot):
+        loaded._on_analyze_clicked()
+        qtbot.keyClick(loaded, Qt.Key.Key_Escape)
+        qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
+        assert loaded.brightness_graph.get_pairs() == []
+        assert loaded._results_model.rowCount() == 0
+
 
 class TestStartupWindowState:
     def test_starts_filling_available_screen_geometry(self, window):
