@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
+from core.latency import default_max_latency_frames
 from core.roi import ROI
 from core.video_io import VideoReader
 from ui.brightness_graph import BrightnessGraphWidget
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
         # cross-thread signal cannot be un-sent, only ignored.
         self._extraction_session: int = 0
         self._delta_user_set: bool = False
+        self._max_latency_user_set: bool = False
         self._cli_args = None
 
         self._build_ui()
@@ -435,7 +437,7 @@ class MainWindow(QMainWindow):
         self.polarity_combo.currentIndexChanged.connect(self._on_polarity_changed)
         self.delta_spin.valueChanged.connect(self._on_delta_spin_changed)
         self.spacing_spin.valueChanged.connect(lambda v: self.brightness_graph.set_min_spacing(v))
-        self.max_latency_spin.valueChanged.connect(lambda v: self.brightness_graph.set_max_latency(v))
+        self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
         self.brightness_graph.pairs_updated.connect(self._update_latency_summary)
         self.brightness_graph.pairs_updated.connect(self._update_results_table)
@@ -485,6 +487,7 @@ class MainWindow(QMainWindow):
         self._stop_extractor()
         self._clear_brightness()
         self._delta_user_set = False
+        self._max_latency_user_set = False
         if self.reader is not None:
             self.reader.release()
         self.reader = new_reader
@@ -846,6 +849,24 @@ class MainWindow(QMainWindow):
         self.delta_spin.setValue(int(effective_delta))
         self.delta_spin.blockSignals(False)
         self.delta_spin.setEnabled(True)
+
+        period_fr = self.brightness_graph.get_orig_period_frames("both")
+        auto_max_latency = default_max_latency_frames(period_fr)
+        if self._cli_args is not None and self._cli_args.max_latency is not None:
+            # CLI value applies to the first analysis only; afterwards it is
+            # the user's spinbox that rules.
+            effective_max_latency = int(self._cli_args.max_latency)
+            self._cli_args.max_latency = None
+            self._max_latency_user_set = True
+        elif self._max_latency_user_set:
+            effective_max_latency = self.max_latency_spin.value()
+        else:
+            effective_max_latency = auto_max_latency
+        self.max_latency_spin.blockSignals(True)
+        self.max_latency_spin.setValue(effective_max_latency)
+        self.max_latency_spin.blockSignals(False)
+        self.brightness_graph.set_max_latency(effective_max_latency)
+
         self.spacing_spin.setEnabled(True)
         self.max_latency_spin.setEnabled(True)
         self.prev_trans_button.setEnabled(True)
@@ -1050,6 +1071,12 @@ class MainWindow(QMainWindow):
         # through blockSignals and don't land here).
         self._delta_user_set = True
         self.brightness_graph.set_delta(float(value))
+
+    def _on_max_latency_spin_changed(self, value: int) -> None:
+        # Same pattern as _on_delta_spin_changed: a user-chosen cap survives
+        # re-analysis; only an untouched spinbox gets the auto-computed value.
+        self._max_latency_user_set = True
+        self.brightness_graph.set_max_latency(value)
 
     def _on_extract_error(self, msg: str, session: int | None = None) -> None:
         if session is not None and session != self._extraction_session:

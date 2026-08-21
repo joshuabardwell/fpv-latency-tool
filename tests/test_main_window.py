@@ -85,7 +85,7 @@ class TestDeltaThreshold:
     def test_cli_min_delta_applied_once(self, loaded, qtbot):
         """Regression: the CLI value used to clobber the spinbox on every
         re-analysis."""
-        loaded._cli_args = SimpleNamespace(min_delta=60)
+        loaded._cli_args = SimpleNamespace(min_delta=60, max_latency=None)
         analyze(loaded, qtbot)
         assert loaded.delta_spin.value() == 60
         assert loaded._cli_args.min_delta is None
@@ -105,6 +105,53 @@ class TestDeltaThreshold:
         float, so the displayed threshold was not the one in effect."""
         analyze(loaded, qtbot)
         assert float(loaded.delta_spin.value()) == loaded.brightness_graph._delta
+
+
+class TestMaxLatencyDefault:
+    def test_stays_unlimited_when_period_unavailable(self, loaded, qtbot):
+        # synth_video has only 1 rising + 1 falling transition -> no period.
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+
+    def test_auto_value_is_half_orig_period(self, loaded, qtbot, monkeypatch):
+        # Isolate the wiring from real period detection by stubbing the period.
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 10
+
+    def test_cli_max_latency_applied_once(self, loaded, qtbot):
+        loaded._cli_args = SimpleNamespace(min_delta=None, max_latency=7)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 7
+        assert loaded._cli_args.max_latency is None
+
+        loaded.max_latency_spin.setValue(3)  # signals live -> marks user-set
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 3
+
+    def test_cli_max_latency_zero_is_explicit_unlimited(self, loaded, qtbot):
+        loaded._cli_args = SimpleNamespace(min_delta=None, max_latency=0)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+        assert loaded._cli_args.max_latency is None
+        # Re-analyze without new CLI input: must not get silently re-defaulted.
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+
+    def test_user_max_latency_survives_reanalysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(4)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 4
+
+    def test_fresh_file_load_clears_user_set_flag(self, loaded, qtbot, synth_video):
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(4)
+        assert loaded._max_latency_user_set is True
+        loaded.open_file(synth_video)
+        assert loaded._max_latency_user_set is False
 
 
 class TestRoiInvalidation:
