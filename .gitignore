@@ -8,3 +8,4 @@ htmlcov/
 build/
 dist/
 TODO.md
+manual_testing/*.mp4

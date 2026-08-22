@@ -46,6 +46,7 @@ from core.video_io import VideoReader
 from ui.brightness_graph import BrightnessGraphWidget
 from ui.roi_frame_view import RoiFrameView
 from ui.timeline import TimelineWidget
+from ui.zoom_bar import ZoomBarWidget
 
 
 def _release_spinbox_focus() -> None:
@@ -342,26 +343,58 @@ class MainWindow(QMainWindow):
         self.pairs_label.setStyleSheet("color: #cccccc; font-size: 11px;")
         layout.addWidget(self.pairs_label)
 
-        # ── Timeline with in/out handles ─────────────────────────────────
+        # ── Timeline with in/out handles, zoom/pan bar above it ────────────
+        # zoom_bar and timeline are stacked in the same QVBoxLayout cell
+        # (rather than each spanning the row independently) so Qt gives them
+        # identical width — their frame-to-pixel mappings line up exactly,
+        # regardless of how wide the flanking nav-button columns are.
         scrub_bar = QHBoxLayout()
-        self.prev_trans_button = QPushButton("◀ Trans")
+
+        self.prev_trans_button = QPushButton("<< Transition")
         self.prev_trans_button.setToolTip("Jump to previous transition (Up)")
         self.prev_trans_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.prev_trans_button.setEnabled(False)
-        self.prev_button = QPushButton("<< Prev")
+        self.prev_unmatched_button = QPushButton("<< Unmatched")
+        self.prev_unmatched_button.setToolTip("Jump to previous unmatched transition")
+        self.prev_unmatched_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.prev_unmatched_button.setEnabled(False)
+        self.prev_button = QPushButton("<< Frame")
         self.prev_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Top to bottom: Transition (nearest the graph above), Unmatched,
+        # Frame (nearest the timeline below).
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.addWidget(self.prev_trans_button)
+        left_col.addWidget(self.prev_unmatched_button)
+        left_col.addWidget(self.prev_button)
+
+        self.zoom_bar = ZoomBarWidget()
         self.timeline = TimelineWidget()
-        self.next_button = QPushButton("Next >>")
-        self.next_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.next_trans_button = QPushButton("Trans ▶")
+        timeline_col = QVBoxLayout()
+        timeline_col.setContentsMargins(0, 0, 0, 0)
+        timeline_col.setSpacing(2)
+        timeline_col.addWidget(self.zoom_bar)
+        timeline_col.addWidget(self.timeline)
+
+        self.next_trans_button = QPushButton("Transition >>")
         self.next_trans_button.setToolTip("Jump to next transition (Down)")
         self.next_trans_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.next_trans_button.setEnabled(False)
-        scrub_bar.addWidget(self.prev_trans_button)
-        scrub_bar.addWidget(self.prev_button)
-        scrub_bar.addWidget(self.timeline, stretch=1)
-        scrub_bar.addWidget(self.next_button)
-        scrub_bar.addWidget(self.next_trans_button)
+        self.next_unmatched_button = QPushButton("Unmatched >>")
+        self.next_unmatched_button.setToolTip("Jump to next unmatched transition")
+        self.next_unmatched_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.next_unmatched_button.setEnabled(False)
+        self.next_button = QPushButton("Frame >>")
+        self.next_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.addWidget(self.next_trans_button)
+        right_col.addWidget(self.next_unmatched_button)
+        right_col.addWidget(self.next_button)
+
+        scrub_bar.addLayout(left_col)
+        scrub_bar.addLayout(timeline_col, stretch=1)
+        scrub_bar.addLayout(right_col)
         layout.addLayout(scrub_bar)
 
         # ── In/out readout ────────────────────────────────────────────────
@@ -421,8 +454,14 @@ class MainWindow(QMainWindow):
         self.timeline.in_point_changed.connect(self._on_in_point_changed)
         self.timeline.out_point_changed.connect(self._on_out_point_changed)
 
+        self.zoom_bar.range_changed.connect(self.brightness_graph.set_visible_range)
+        self.brightness_graph.visible_range_changed.connect(self.zoom_bar.set_range)
+        self.brightness_graph.domain_changed.connect(self.zoom_bar.set_analysis_bounds)
+
         self.prev_trans_button.clicked.connect(self._goto_prev_transition)
         self.next_trans_button.clicked.connect(self._goto_next_transition)
+        self.prev_unmatched_button.clicked.connect(self._goto_prev_unmatched)
+        self.next_unmatched_button.clicked.connect(self._goto_next_unmatched)
 
         # Navigation keys are handled in keyPressEvent, NOT as QShortcuts:
         # window-context shortcuts intercept keys before the focused widget
@@ -513,6 +552,7 @@ class MainWindow(QMainWindow):
         self.reader.fps_effective = self.fps_spin.value()
 
         self.timeline.reset(meta.frame_count)
+        self.zoom_bar.reset(meta.frame_count)
         self._reset_roi_state()
         self._set_controls_enabled(True)
         self.show_cli_btn.setEnabled(True)
@@ -676,6 +716,20 @@ class MainWindow(QMainWindow):
         if self.reader is None:
             return
         frame = self.brightness_graph.next_transition(self.timeline.current_frame)
+        if frame is not None:
+            self.show_frame(frame)
+
+    def _goto_prev_unmatched(self) -> None:
+        if self.reader is None:
+            return
+        frame = self.brightness_graph.prev_unmatched(self.timeline.current_frame)
+        if frame is not None:
+            self.show_frame(frame)
+
+    def _goto_next_unmatched(self) -> None:
+        if self.reader is None:
+            return
+        frame = self.brightness_graph.next_unmatched(self.timeline.current_frame)
         if frame is not None:
             self.show_frame(frame)
 
@@ -884,6 +938,8 @@ class MainWindow(QMainWindow):
         self.max_latency_auto_btn.setEnabled(True)
         self.prev_trans_button.setEnabled(True)
         self.next_trans_button.setEnabled(True)
+        self.prev_unmatched_button.setEnabled(True)
+        self.next_unmatched_button.setEnabled(True)
         self.analysis_widget.hide()
         self.fps_verify_widget.show()
         count = len(orig)
@@ -1118,6 +1174,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "prev_trans_button"):
             self.prev_trans_button.setEnabled(False)
             self.next_trans_button.setEnabled(False)
+            self.prev_unmatched_button.setEnabled(False)
+            self.next_unmatched_button.setEnabled(False)
         if hasattr(self, "delta_spin"):
             self.delta_spin.setEnabled(False)
         if hasattr(self, "spacing_spin"):

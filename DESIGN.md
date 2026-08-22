@@ -28,11 +28,13 @@ core/
   detection.py            derivative-based transition detection (pure NumPy)
   latency.py              LatencyPair + pair_transitions (greedy matching)
   export.py               CSV export of latency pairs (stdlib csv)
+  view_range.py            pure clamp/center/zoom/pan math for graph zoom
 ui/
   main_window.py          MainWindow: layout, wiring, CLI args, CSV export
   roi_frame_view.py       RoiFrameView: frame display + click-drag ROI overlay
   brightness_graph.py     BrightnessGraphWidget: traces, detection, pair markers
   timeline.py             TimelineWidget: playhead + draggable in/out handles
+  zoom_bar.py              ZoomBarWidget: graph zoom/pan bar above the timeline
 ```
 
 `core/` has no Qt-widget dependencies beyond `extractor.py`'s QThread and is
@@ -91,6 +93,40 @@ Three spaces exist and `roi_frame_view.py` is the only translator:
 Mouse events map label → frame via `_label_to_frame` (subtract the centering
 offset, divide by the scale). Drawing maps frame → scaled-pixmap in
 `_redraw`. Everything outside this file works purely in frame pixels.
+
+## Graph zoom/pan (X axis only)
+
+`BrightnessGraphWidget` is the canonical owner of its own visible X range
+(`_visible_start`/`_visible_end`, always inside `_range_lo`/`_range_hi` — the
+plotted-data domain from the last `set_data` call). `ZoomBarWidget` mirrors
+it rather than owning it: it has its own *outer* domain (the whole loaded
+video, set once via `reset(frame_count)`, matching `TimelineWidget`'s scale
+so the two widgets' pixel positions line up), plus the graph's domain drawn
+inside that as an analysis-boundary marker. The bar's draggable handles are
+clamped to that marker, not the outer domain — there's no plotted data
+outside it to zoom into.
+
+All range math (clamping to bounds, minimum zoom width, centering, scaling
+around an anchor, panning) lives in `core/view_range.py`, pure and
+Qt-free — the graph's wheel-zoom and click-drag pan, and the bar's handle
+and middle-bar drag, all route through it so they can't disagree about
+limits.
+
+Sync is signal-driven, one direction per concept:
+- `zoom_bar.range_changed → graph.set_visible_range` (bar drag drives the graph)
+- `graph.visible_range_changed → zoom_bar.set_range` (graph-side zoom/pan — wheel,
+  click-drag — mirrors back to the bar)
+- `graph.domain_changed → zoom_bar.set_analysis_bounds` (new/cleared analysis
+  moves the marker and resets zoom to 100%)
+
+The playhead recenters the visible window on every frame change (keyboard
+step, timeline drag, transition jump, playback tick) as part of
+`BrightnessGraphWidget.set_frame` — the only call site for playhead
+movement, so no other wiring is needed. Recentering clamps the *window*, not
+just its center, so near a domain edge the window's own edge pins to the
+boundary instead of overhanging past it — the playhead drifts off-center
+and reaches the graph's edge exactly when it reaches the last analyzed
+frame, with no dead space ever shown past the data.
 
 ## Detection algorithm and its limits
 

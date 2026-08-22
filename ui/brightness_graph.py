@@ -24,11 +24,15 @@ Transition markers:
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPainterPath
 
 from core.detection import apply_min_spacing, find_falling, find_rising
 from core.latency import LatencyPair, pair_transitions
+from core.view_range import MIN_ZOOM_FRAMES, center_range, clamp_range, pan_range, zoom_range
+
+_WHEEL_ZOOM_IN  = 0.85          # per-notch scale factor when zooming in
+_WHEEL_ZOOM_OUT = 1.0 / _WHEEL_ZOOM_IN
 
 _GREEN  = (0, 230, 0)
 _AMBER  = (255, 160, 0)
@@ -73,6 +77,8 @@ _PLAYHEAD_SYMBOL = _make_playhead_symbol()
 class BrightnessGraphWidget(pg.PlotWidget):
 
     pairs_updated = pyqtSignal()
+    visible_range_changed = pyqtSignal(float, float)  # X-axis zoom/pan window changed
+    domain_changed = pyqtSignal(float, float)          # plotted-data range changed (set_data/clear_data)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,6 +87,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self.setMenuEnabled(False)
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
+        self.setMouseTracking(True)  # hover cursor for click-drag pan, without a button held
 
         pi = self.getPlotItem()
         pi.hideAxis("bottom")
@@ -140,6 +147,17 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._ydata_min: float = 0.0
         self._ydata_max: float = 255.0
 
+        # Zoom/pan (X axis only). Domain is the plotted-data range from the
+        # last set_data call; visible is the current zoomed/panned window,
+        # always clamped inside the domain.
+        self._range_lo: float = 0.0
+        self._range_hi: float = 0.0
+        self._visible_start: float = 0.0
+        self._visible_end: float = 0.0
+        self._pan_drag_active = False
+        self._pan_drag_start_screen_x = 0.0
+        self._pan_drag_start_range = (0.0, 0.0)
+
         # Cached per-polarity transition frame lists
         self._rise_orig_frames: list[int] = []
         self._fall_orig_frames: list[int] = []
@@ -156,6 +174,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
 
         self._polarity = "both"
         self._transition_frames: list[int] = []
+        self._unmatched_frames: list[int] = []
 
     # ------------------------------------------------------------------ public
 
@@ -165,6 +184,10 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._n         = len(orig)
         self._orig_data = orig
         self._disp_data = disp
+
+        self._range_lo = float(in_point)
+        self._range_hi = float(in_point + len(orig) - 1)
+        self._visible_start, self._visible_end = self._range_lo, self._range_hi
 
         x = np.arange(in_point, in_point + len(orig), dtype=np.float64)
         self._line_orig.setData(x=x, y=orig.astype(np.float64))
@@ -193,6 +216,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._playhead_marker.setVisible(True)
 
         self._redetect()
+        self.domain_changed.emit(self._range_lo, self._range_hi)
         return self._delta
 
     def set_delta(self, delta: float) -> None:
@@ -219,10 +243,28 @@ class BrightnessGraphWidget(pg.PlotWidget):
         if self._playhead_marker.isVisible():
             self._playhead_stalk.setData(x=[frame, frame], y=[self._playhead_apex_y, self._playhead_y1])
             self._playhead_marker.setData(x=[frame], y=[self._playhead_y0])
+            width = self._visible_end - self._visible_start
+            self.set_visible_range(*center_range(
+                frame, width, self._range_lo, self._range_hi, MIN_ZOOM_FRAMES,
+            ))
+
+    def set_visible_range(self, start: float, end: float) -> None:
+        """Set the graph's visible X window (zoom/pan), clamped to the
+        plotted-data domain. Emits visible_range_changed on actual change —
+        the zoom bar mirrors this to stay in sync with wheel-zoom and
+        click-drag pan, both of which also go through this method."""
+        if self._range_hi <= self._range_lo:
+            return
+        start, end = clamp_range(start, end, self._range_lo, self._range_hi, MIN_ZOOM_FRAMES)
+        if (start, end) != (self._visible_start, self._visible_end):
+            self._visible_start, self._visible_end = start, end
+            self._vb.setXRange(start, end, padding=0)
+            self.visible_range_changed.emit(start, end)
 
     def clear_data(self) -> None:
         self._orig_data = self._disp_data = None
         self._transition_frames = []
+        self._unmatched_frames = []
         # Fresh list per attribute — chained `a = b = []` would alias them.
         self._rise_orig_frames, self._fall_orig_frames = [], []
         self._rise_disp_frames, self._fall_disp_frames = [], []
@@ -240,6 +282,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._playhead_marker.setVisible(False)
         self.setYRange(0, 255, padding=0.04)
         self._n = 0
+        self._range_lo = self._range_hi = 0.0
+        self._visible_start = self._visible_end = 0.0
+        self.domain_changed.emit(0.0, -1.0)
         self.pairs_updated.emit()
 
     def next_transition(self, after_frame: int) -> int | None:
@@ -251,6 +296,19 @@ class BrightnessGraphWidget(pg.PlotWidget):
     def prev_transition(self, before_frame: int) -> int | None:
         result = None
         for f in self._transition_frames:
+            if f < before_frame:
+                result = f
+        return result
+
+    def next_unmatched(self, after_frame: int) -> int | None:
+        for f in self._unmatched_frames:
+            if f > after_frame:
+                return f
+        return None
+
+    def prev_unmatched(self, before_frame: int) -> int | None:
+        result = None
+        for f in self._unmatched_frames:
             if f < before_frame:
                 result = f
         return result
@@ -289,6 +347,67 @@ class BrightnessGraphWidget(pg.PlotWidget):
             uo += len(self._fall_orig_unmatched)
             ud += len(self._fall_disp_unmatched)
         return uo, ud
+
+    # ------------------------------------------------------------------ mouse
+
+    def wheelEvent(self, event) -> None:
+        """Zoom the X axis around the cursor. Not calling super() is
+        deliberate: setMouseEnabled(x=False, y=False) already suppresses the
+        ViewBox's own wheel-zoom, but this replaces it outright rather than
+        layering on top of it."""
+        if self._range_hi <= self._range_lo:
+            return
+        anchor = self._scene_x_to_data(event.position())
+        factor = _WHEEL_ZOOM_IN if event.angleDelta().y() > 0 else _WHEEL_ZOOM_OUT
+        self._apply_zoom(factor, anchor)
+        event.accept()
+
+    def _apply_zoom(self, factor: float, anchor: float) -> None:
+        self.set_visible_range(*zoom_range(
+            self._visible_start, self._visible_end, factor, anchor,
+            self._range_lo, self._range_hi, MIN_ZOOM_FRAMES,
+        ))
+
+    def _scene_x_to_data(self, pos) -> float:
+        scene_pos = self.mapToScene(pos.toPoint())
+        return self._vb.mapSceneToView(scene_pos).x()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._range_hi > self._range_lo:
+            self._pan_drag_active = True
+            self._pan_drag_start_screen_x = event.position().x()
+            self._pan_drag_start_range = (self._visible_start, self._visible_end)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._pan_drag_active:
+            dx_px = event.position().x() - self._pan_drag_start_screen_x
+            self._apply_pan_drag(dx_px)
+            event.accept()
+            return
+        if self._range_hi > self._range_lo:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._pan_drag_active and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_drag_active = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _apply_pan_drag(self, dx_px: float) -> None:
+        """dx_px: horizontal mouse movement in screen pixels since the drag
+        started. Dragging right (positive dx_px) reveals earlier frames, as
+        if grabbing and pulling the plotted content along with the cursor."""
+        px_data, _ = self._vb.viewPixelSize()
+        delta = -dx_px * px_data
+        start0, end0 = self._pan_drag_start_range
+        self.set_visible_range(*pan_range(start0, end0, delta, self._range_lo, self._range_hi))
 
     # --------------------------------------------------------------- internals
 
@@ -331,6 +450,13 @@ class BrightnessGraphWidget(pg.PlotWidget):
         if show_f:
             frames.update(self._fall_orig_frames, self._fall_disp_frames)
         self._transition_frames = sorted(frames)
+
+        unmatched: set[int] = set()
+        if show_r:
+            unmatched.update(self._rise_orig_unmatched, self._rise_disp_unmatched)
+        if show_f:
+            unmatched.update(self._fall_orig_unmatched, self._fall_disp_unmatched)
+        self._unmatched_frames = sorted(unmatched)
 
         self._populate_unmatched(
             self._rise_orig_unmatched, self._orig_data,
