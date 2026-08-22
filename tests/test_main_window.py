@@ -40,13 +40,77 @@ def analyze(win, qtbot):
 
 
 class TestAnalysisLifecycle:
+    def test_summary_tables_placeholder_before_analysis(self, window):
+        """Regression: each direction's Mean/Min/Max/Median summary must
+        always be visible, showing a placeholder rather than being blank
+        when nothing is loaded."""
+        for model in (window._rise_summary_model, window._fall_summary_model):
+            assert [model.headerData(c, Qt.Orientation.Horizontal) for c in range(4)] == \
+                ["Mean", "Min", "Max", "Median"]
+            assert [model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+
+    def test_summary_tables_populated_after_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        fps = loaded.reader.fps_effective
+        rise_pairs = loaded.brightness_graph.get_pairs_for("rising")
+        fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
+        rise_expected = f"{rise_pairs[0].delta_ms(fps):.1f} ms"
+        fall_expected = f"{fall_pairs[0].delta_ms(fps):.1f} ms"
+        assert [loaded._rise_summary_model.item(0, c).text() for c in range(4)] == [rise_expected] * 4
+        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == [fall_expected] * 4
+
     def test_analysis_finds_known_latency(self, loaded, qtbot):
         analyze(loaded, qtbot)
         pairs = loaded.brightness_graph.get_pairs()
         assert len(pairs) == 2  # one rising, one falling
         assert all(p.delta_frames() == SYNTH_LATENCY for p in pairs)
-        assert loaded._results_model.rowCount() == 2
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
         assert loaded.export_csv_btn.isEnabled()
+
+    def test_results_tables_split_by_polarity(self, loaded, qtbot):
+        """Regression: rise table must show only rising pairs, fall table only
+        falling pairs — no cross-contamination between the two panels."""
+        analyze(loaded, qtbot)
+        rise_pairs = loaded.brightness_graph.get_pairs_for("rising")
+        fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
+        assert loaded._rise_results_model.rowCount() == len(rise_pairs) == 1
+        assert loaded._fall_results_model.rowCount() == len(fall_pairs) == 1
+        assert int(loaded._rise_results_model.item(0, 0).text()) == rise_pairs[0].orig_frame
+        assert int(loaded._fall_results_model.item(0, 0).text()) == fall_pairs[0].orig_frame
+
+    def test_results_panels_always_visible(self, loaded, qtbot):
+        """Regression: both direction panels stay visible at all times —
+        before any analysis, and after a single-direction analysis — only
+        their row/summary content goes blank, the panel itself never hides."""
+        assert loaded.rise_results_container.isVisible()
+        assert loaded.fall_results_container.isVisible()
+
+        idx = loaded.polarity_combo.findData("rising")
+        loaded.polarity_combo.setCurrentIndex(idx)
+        analyze(loaded, qtbot)
+        assert loaded.rise_results_container.isVisible()
+        assert loaded.fall_results_container.isVisible()
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 0
+        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+
+    def test_results_panel_pinned_until_next_analyze(self, loaded, qtbot):
+        """Regression: the results panel content must stay pinned to the
+        polarity used for the last Analyze — the Direction pulldown alone
+        must not reshuffle a loaded result set. Only clicking Analyze again
+        should apply a new pulldown selection."""
+        idx = loaded.polarity_combo.findData("rising")
+        loaded.polarity_combo.setCurrentIndex(idx)
+        analyze(loaded, qtbot)
+        assert loaded._fall_results_model.rowCount() == 0
+
+        idx = loaded.polarity_combo.findData("both")
+        loaded.polarity_combo.setCurrentIndex(idx)
+        assert loaded._fall_results_model.rowCount() == 0
+
+        analyze(loaded, qtbot)
+        assert loaded._fall_results_model.rowCount() == 1
 
     def test_analyze_button_reenabled_after_completion(self, loaded, qtbot):
         analyze(loaded, qtbot)
@@ -67,19 +131,18 @@ class TestAnalysisLifecycle:
         loaded._on_cancel_clicked()
         qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
         assert loaded.brightness_graph.get_pairs() == []
-        assert loaded._results_model.rowCount() == 0
+        assert loaded._rise_results_model.rowCount() == 0
+        assert loaded._fall_results_model.rowCount() == 0
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        model = window._results_model
-        headers = [
-            model.headerData(c, Qt.Orientation.Horizontal)
-            for c in range(model.columnCount())
-        ]
-        assert headers == [
-            "#", "Original Frame", "Display Frame", "Direction",
-            "Latency (fr)", "Latency (ms)",
-        ]
+        expected = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        for model in (window._rise_results_model, window._fall_results_model):
+            headers = [
+                model.headerData(c, Qt.Orientation.Horizontal)
+                for c in range(model.columnCount())
+            ]
+            assert headers == expected
 
 
 class TestDeltaThreshold:
@@ -195,7 +258,8 @@ class TestRoiInvalidation:
         assert loaded.export_csv_btn.isEnabled()
         loaded._undo_roi()
         assert loaded.brightness_graph.get_pairs() == []
-        assert loaded._results_model.rowCount() == 0
+        assert loaded._rise_results_model.rowCount() == 0
+        assert loaded._fall_results_model.rowCount() == 0
         assert not loaded.export_csv_btn.isEnabled()
 
 
@@ -207,13 +271,15 @@ class TestSessionInvalidation:
         import numpy as np
 
         analyze(loaded, qtbot)
-        assert loaded._results_model.rowCount() == 2
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
         stale = np.zeros(5, dtype=np.float32)
         loaded._on_extract_finished(
             stale, stale, 0, session=loaded._extraction_session - 1
         )
         assert loaded.brightness_graph._n == 40  # untouched
-        assert loaded._results_model.rowCount() == 2
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
 
     def test_roi_change_mid_analysis_discards_results(self, loaded, qtbot):
         """Regression: editing an ROI while extraction ran left results for
@@ -224,7 +290,8 @@ class TestSessionInvalidation:
         )
         qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
         assert loaded.brightness_graph.get_pairs() == []
-        assert loaded._results_model.rowCount() == 0
+        assert loaded._rise_results_model.rowCount() == 0
+        assert loaded._fall_results_model.rowCount() == 0
         assert not loaded.export_csv_btn.isEnabled()
 
     def test_failed_open_preserves_session(self, loaded, qtbot):
@@ -235,7 +302,8 @@ class TestSessionInvalidation:
         loaded.open_file("/nonexistent/nope.mp4")
         assert "Error" in loaded.status_label.text()
         assert loaded.reader.frame_count == frames_before
-        assert loaded._results_model.rowCount() == 2
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
         loaded.show_frame(5)  # reader still usable
 
 
@@ -316,14 +384,17 @@ class TestKeyboardNavigation:
         qtbot.keyClick(loaded, Qt.Key.Key_Escape)
         qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
         assert loaded.brightness_graph.get_pairs() == []
-        assert loaded._results_model.rowCount() == 0
+        assert loaded._rise_results_model.rowCount() == 0
+        assert loaded._fall_results_model.rowCount() == 0
 
-    def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot):
-        """Regression: results_table had no focus policy, so QTableView's
+    @pytest.mark.parametrize("table_attr", ["rise_results_table", "fall_results_table"])
+    def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot, table_attr):
+        """Regression: results tables had no focus policy, so QTableView's
         default StrongFocus let a click steal focus and swallow the
         keyPressEvent-based navigation shortcuts (arrows, Home/End, I/O, etc.)."""
-        qtbot.mouseClick(loaded.results_table.viewport(), Qt.MouseButton.LeftButton)
-        assert not loaded.results_table.hasFocus()
+        table = getattr(loaded, table_attr)
+        qtbot.mouseClick(table.viewport(), Qt.MouseButton.LeftButton)
+        assert not table.hasFocus()
 
 
 class TestZoomPanWiring:

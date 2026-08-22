@@ -62,9 +62,10 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    the nearest display transition at or after it (same polarity: rising with
    rising, falling with falling), one-to-one, optionally capped by Max Latency.
    A same-frame match counts as zero latency. Unmatched transitions render red.
-6. **Results** — pairs feed the table, the mean/min/max summary, CSV export, and
-   the FPS verification row (measured original-pattern period vs. user-entered
-   known period → computed true fps).
+6. **Results** — pairs feed the rise/fall results tables, the mean/min/max
+   summary, CSV export, and the FPS verification row (measured
+   original-pattern period vs. user-entered known period → computed true
+   fps).
 
 ## Threading model
 

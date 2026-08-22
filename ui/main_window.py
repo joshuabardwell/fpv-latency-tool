@@ -10,6 +10,7 @@ Architecture and data flow are described in DESIGN.md.
 
 import argparse
 import os
+import statistics
 import sys
 
 import cv2
@@ -120,10 +121,16 @@ class MainWindow(QMainWindow):
         self._delta_user_set: bool = False
         self._max_latency_user_set: bool = False
         self._cli_args = None
+        # The polarity in effect when Analyze was last clicked — the results
+        # panel (which table(s) show, and their rows) is pinned to this until
+        # the next Analyze, so it doesn't shift out from under a loaded result
+        # set just because the user is browsing the Direction pulldown.
+        self._results_polarity: str | None = None
 
         self._build_ui()
         self._wire_events()
         self._set_controls_enabled(False)
+        self._update_results_table()
 
     # ---------------------------------------------------------- UI setup
 
@@ -414,34 +421,67 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
-        self.latency_summary_label = QLabel("")
-        self.latency_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.latency_summary_label.setStyleSheet("color: #cccccc; font-size: 22px; font-weight: bold;")
-        right_layout.addWidget(self.latency_summary_label)
+        result_columns = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+
+        self.rise_results_container, self._rise_results_model, self.rise_results_table, \
+            self._rise_summary_model = self._build_results_table(
+                "Dark To Light Transitions", result_columns)
+        self.fall_results_container, self._fall_results_model, self.fall_results_table, \
+            self._fall_summary_model = self._build_results_table(
+                "Light To Dark Transitions", result_columns)
+        right_layout.addWidget(self.rise_results_container, 1)
+        right_layout.addWidget(self.fall_results_container, 1)
 
         self.export_csv_btn = QPushButton("Export CSV…")
         self.export_csv_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.export_csv_btn.setEnabled(False)
         right_layout.addWidget(self.export_csv_btn)
 
-        self._results_model = QStandardItemModel(0, 6)
-        self._results_model.setHorizontalHeaderLabels([
-            "#", "Original Frame", "Display Frame", "Direction",
-            "Latency (fr)", "Latency (ms)",
-        ])
-        self.results_table = QTableView()
-        self.results_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.results_table.setModel(self._results_model)
-        self.results_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.results_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.results_table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
-        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.results_table.verticalHeader().setVisible(False)
-        right_layout.addWidget(self.results_table)
-
         splitter.addWidget(right_widget)
         splitter.setSizes([800, 600])
         self.setCentralWidget(splitter)
+
+    def _build_results_table(
+        self, title: str, columns: list[str]
+    ) -> tuple[QWidget, QStandardItemModel, QTableView, QStandardItemModel]:
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight: bold; color: #cccccc;")
+        container_layout.addWidget(title_label)
+
+        summary_model = QStandardItemModel(1, 4)
+        summary_model.setHorizontalHeaderLabels(["Mean", "Min", "Max", "Median"])
+        summary_table = QTableView()
+        summary_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        summary_table.setModel(summary_model)
+        summary_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        summary_table.setSelectionMode(QTableView.SelectionMode.NoSelection)
+        summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        summary_table.verticalHeader().setVisible(False)
+        summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        summary_table.setFixedHeight(
+            summary_table.horizontalHeader().height() + summary_table.rowHeight(0)
+            + 2 * summary_table.frameWidth() + 2
+        )
+        container_layout.addWidget(summary_table)
+
+        model = QStandardItemModel(0, len(columns))
+        model.setHorizontalHeaderLabels(columns)
+        table = QTableView()
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setModel(model)
+        table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        container_layout.addWidget(table)
+
+        return container, model, table, summary_model
 
     def _wire_events(self) -> None:
         self.open_button.clicked.connect(self.on_open_file)
@@ -489,13 +529,13 @@ class MainWindow(QMainWindow):
         self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
         self.max_latency_auto_btn.clicked.connect(self._on_max_latency_auto_clicked)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
-        self.brightness_graph.pairs_updated.connect(self._update_latency_summary)
-        self.brightness_graph.pairs_updated.connect(self._update_results_table)
+        self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
         self.known_period_spin.valueChanged.connect(self._update_fps_verify_row)
         self.show_cli_btn.clicked.connect(self._on_show_cli)
         self.export_csv_btn.clicked.connect(self._on_export_csv)
-        self.results_table.clicked.connect(self._on_results_row_clicked)
+        self.rise_results_table.clicked.connect(self._on_results_row_clicked)
+        self.fall_results_table.clicked.connect(self._on_results_row_clicked)
         self.frame_view.roi_changed.connect(self._on_roi_changed)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
@@ -566,7 +606,6 @@ class MainWindow(QMainWindow):
             self.show_frame(self.timeline.current_frame)
             self._update_inout_label()
             self._update_pairs_label()
-            self._update_latency_summary()
             self._update_results_table()
             self._update_fps_verify_row()
 
@@ -826,6 +865,8 @@ class MainWindow(QMainWindow):
         if roi_orig is None or roi_disp is None:
             return
 
+        self._results_polarity = self.polarity_combo.currentData()
+
         # A replaced-but-still-running worker would be garbage collected
         # while its thread is alive (hard crash) — make sure it is done.
         if self._extractor is not None:
@@ -942,6 +983,10 @@ class MainWindow(QMainWindow):
         self.next_unmatched_button.setEnabled(True)
         self.analysis_widget.hide()
         self.fps_verify_widget.show()
+        # Snapshot the results panel now, at the true end of analysis — set_delta
+        # / set_max_latency above may have re-run pairing since set_data(); this
+        # is the final pairs state, gated by the polarity captured on click.
+        self._update_results_table()
         count = len(orig)
         if count < self._extraction_requested:
             self.status_label.setText(
@@ -956,24 +1001,52 @@ class MainWindow(QMainWindow):
             )
 
     def _on_results_row_clicked(self, index) -> None:
-        item = self._results_model.item(index.row(), 1)  # column 1 = Original Frame
+        item = index.model().item(index.row(), 0)  # column 0 = Original Frame
         if item is not None and self.reader is not None:
             self.show_frame(int(item.text()))
 
+    def _update_export_csv_enabled(self) -> None:
+        self.export_csv_btn.setEnabled(bool(self.brightness_graph.get_pairs()))
+
     def _update_results_table(self) -> None:
-        pairs = self.brightness_graph.get_pairs()
+        """Repopulates both rise/fall panels (table + summary) for whatever
+        polarity was in effect at the last Analyze click (self._results_polarity),
+        not the live Direction pulldown — call this only when results actually
+        change (analysis completes, or results are invalidated), never as a
+        reaction to the pulldown alone. Both panels are always visible; a
+        direction with no matching pairs just shows blank/placeholder rows."""
+        mode = self._results_polarity
         fps = self.reader.fps_effective if self.reader else 30.0
-        self._results_model.setRowCount(0)
-        for i, p in enumerate(pairs, 1):
-            self._results_model.appendRow([
-                QStandardItem(str(i)),
+        rise_pairs = self.brightness_graph.get_pairs_for("rising", active=mode) if mode else []
+        fall_pairs = self.brightness_graph.get_pairs_for("falling", active=mode) if mode else []
+        self._populate_results_model(self._rise_results_model, rise_pairs, fps)
+        self._populate_results_model(self._fall_results_model, fall_pairs, fps)
+        self._populate_summary_model(self._rise_summary_model, rise_pairs, fps)
+        self._populate_summary_model(self._fall_summary_model, fall_pairs, fps)
+
+    def _populate_results_model(self, model: QStandardItemModel, pairs: list, fps: float) -> None:
+        model.setRowCount(0)
+        for p in pairs:
+            model.appendRow([
                 QStandardItem(str(p.orig_frame)),
                 QStandardItem(str(p.disp_frame)),
-                QStandardItem("▲" if p.polarity == "rising" else "▼"),
                 QStandardItem(str(p.delta_frames())),
                 QStandardItem(f"{p.delta_ms(fps):.1f}"),
             ])
-        self.export_csv_btn.setEnabled(bool(pairs))
+
+    def _populate_summary_model(self, model: QStandardItemModel, pairs: list, fps: float) -> None:
+        if not pairs:
+            values = ["--.- ms"] * 4
+        else:
+            latencies = [p.delta_ms(fps) for p in pairs]
+            values = [
+                f"{sum(latencies) / len(latencies):.1f} ms",
+                f"{min(latencies):.1f} ms",
+                f"{max(latencies):.1f} ms",
+                f"{statistics.median(latencies):.1f} ms",
+            ]
+        for col, text in enumerate(values):
+            model.setItem(0, col, QStandardItem(text))
 
     def _on_export_csv(self) -> None:
         pairs = self.brightness_graph.get_pairs()
@@ -1004,19 +1077,6 @@ class MainWindow(QMainWindow):
         if parts:
             text += "  |  " + ", ".join(parts)
         self.pairs_label.setText(text)
-
-    def _update_latency_summary(self) -> None:
-        pairs = self.brightness_graph.get_pairs()
-        if not pairs:
-            self.latency_summary_label.setText("")
-            return
-        fps = self.reader.fps_effective if self.reader else 30.0
-        latencies = [p.delta_ms(fps) for p in pairs]
-        self.latency_summary_label.setText(
-            f"mean {sum(latencies) / len(latencies):.1f} ms  "
-            f"min {min(latencies):.1f} ms  "
-            f"max {max(latencies):.1f} ms"
-        )
 
     def _update_fps_verify_row(self) -> None:
         polarity = self.polarity_combo.currentData()
@@ -1186,12 +1246,11 @@ class MainWindow(QMainWindow):
             self.max_latency_auto_btn.setEnabled(False)
         if hasattr(self, "pairs_label"):
             self.pairs_label.setText("")
-        if hasattr(self, "latency_summary_label"):
-            self.latency_summary_label.setText("")
         if hasattr(self, "fps_verify_widget"):
             self.fps_verify_widget.hide()
-        if hasattr(self, "_results_model"):
-            self._results_model.setRowCount(0)
+        if hasattr(self, "_rise_results_model"):
+            self._results_polarity = None
+            self._update_results_table()
         if hasattr(self, "export_csv_btn"):
             self.export_csv_btn.setEnabled(False)
 
