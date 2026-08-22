@@ -34,6 +34,20 @@ class TestBrightnessGraphTransitionSymbols:
             assert not _apex_is_up(item.opts["symbol"])
 
 
+class TestBrightnessGraphMarkerContrast:
+    def test_signal_lines_paint_above_transition_markers(self, qtbot):
+        g = make_graph(qtbot)
+        assert g._line_orig.zValue() > g._sc_rise_orig.zValue()
+        assert g._line_orig.zValue() > g._sc_fall_orig.zValue()
+        assert g._line_disp.zValue() > g._sc_rise_disp.zValue()
+        assert g._line_disp.zValue() > g._sc_fall_disp.zValue()
+
+    def test_marker_tints_are_darker_than_line(self):
+        from ui.brightness_graph import _GREEN, _GREEN_MARKER, _AMBER, _AMBER_MARKER
+        assert sum(_GREEN_MARKER) < sum(_GREEN)
+        assert sum(_AMBER_MARKER) < sum(_AMBER)
+
+
 class TestOrigPeriod:
     def test_none_with_fewer_than_two_transitions(self, qtbot):
         g = make_graph(qtbot)

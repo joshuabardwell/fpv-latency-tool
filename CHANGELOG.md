@@ -19,7 +19,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
-- Brightness graph transition markers use a lighter shade than their line so they stay visible when the line gets noisy near a transition.
+- Brightness graph transition markers use a darker shade than their line, and the line now paints solid through each marker instead of being interrupted by it, so markers stay visible when the line gets noisy near a transition.
 
 ### Removed
 - The dashed horizontal lines on the brightness graph (drawn at each signal's min/max midpoint). They were never tied to the actual delta-based detection and could be mistaken for the real detection threshold.

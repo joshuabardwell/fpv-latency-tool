@@ -35,10 +35,10 @@ _AMBER  = (255, 160, 0)
 _YELLOW = (255, 204, 0)
 _RED    = (220, 50, 50)
 
-# Lighter tints for transition markers, distinct from the line colors above
+# Darker tints for transition markers, distinct from the line colors above
 # so a marker doesn't disappear into a noisy/jittery line of the same hue.
-_GREEN_MARKER = (64, 236, 64)
-_AMBER_MARKER = (255, 184, 64)
+_GREEN_MARKER = (0, 140, 0)
+_AMBER_MARKER = (194, 120, 0)
 
 _PLAYHEAD_SYMBOL_SIZE    = 16  # ScatterPlotItem `size=` -- must be >= 2x the
                                # farthest path point from the anchor (7px here)
@@ -92,6 +92,10 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # Signal lines
         self._line_orig = self.plot(pen=pg.mkPen(_GREEN, width=1.5))
         self._line_disp = self.plot(pen=pg.mkPen(_AMBER, width=1.5))
+        # Paint the line above the transition markers (default zValue=0) so
+        # it reads as continuous instead of being cut out at each marker.
+        self._line_orig.setZValue(1)
+        self._line_disp.setZValue(1)
 
         # Transition scatter items: rising ▲ and falling ▼, per signal
         self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN_MARKER), size=9, symbol="t1")
