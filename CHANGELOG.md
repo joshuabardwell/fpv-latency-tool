@@ -8,6 +8,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Max Latency now defaults to half the measured Original Period after analysis (was always "unlimited"), reducing the chance of wraparound mis-pairing without requiring manual tuning; an explicit `--max-latency` CLI value or a user edit still takes precedence.
 - "Auto" button next to Max Latency snaps it back to half the measured Original Period on demand, once a CLI value or manual edit has overridden the default.
 - Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
+- Esc now cancels a running analysis, same as clicking the Cancel button.
 
 ### Fixed
 - CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.

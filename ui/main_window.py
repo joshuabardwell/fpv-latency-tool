@@ -639,6 +639,7 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_Home:     self._goto_in,
             Qt.Key.Key_End:      self._goto_out,
             Qt.Key.Key_Space:    self._toggle_playback,
+            Qt.Key.Key_Escape:   self._on_cancel_clicked,
         }
         handler = handlers.get(event.key())
         plain = not (event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
