@@ -25,6 +25,7 @@ Transition markers:
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPainterPath
 
 from core.detection import apply_min_spacing, find_falling, find_rising
 from core.latency import LatencyPair, pair_transitions
@@ -33,6 +34,33 @@ _GREEN  = (0, 230, 0)
 _AMBER  = (255, 160, 0)
 _YELLOW = (255, 204, 0)
 _RED    = (220, 50, 50)
+
+_PLAYHEAD_SYMBOL_SIZE    = 16  # ScatterPlotItem `size=` -- must be >= 2x the
+                               # farthest path point from the anchor (7px here)
+                               # or pyqtgraph's own sprite canvas clips it.
+_PLAYHEAD_TRI_BASE_PX    = 10  # matches TimelineWidget's playhead triangle base
+_PLAYHEAD_TRI_H_PX       = 7   # matches TimelineWidget's playhead triangle height
+_PLAYHEAD_EDGE_MARGIN_PX = 2   # antialiasing safety gap above the ViewBox's
+                               # rendered bottom edge (belt-and-braces on top of
+                               # the structural anchor-at-base fix)
+
+
+def _make_playhead_symbol() -> QPainterPath:
+    """Upward-pointing triangle whose local origin (0, 0) is its BASE
+    midpoint, not its centroid, so the stalk can start at the apex instead
+    of passing through the triangle body. Sized to match
+    TimelineWidget._draw_playhead's 10x7px triangle."""
+    half_w = (_PLAYHEAD_TRI_BASE_PX / _PLAYHEAD_SYMBOL_SIZE) / 2
+    h = _PLAYHEAD_TRI_H_PX / _PLAYHEAD_SYMBOL_SIZE
+    path = QPainterPath()
+    path.moveTo(-half_w, 0.0)   # base, left
+    path.lineTo(half_w, 0.0)    # base, right
+    path.lineTo(0.0, -h)        # apex -- negative local y renders "up" on screen
+    path.closeSubpath()
+    return path
+
+
+_PLAYHEAD_SYMBOL = _make_playhead_symbol()
 
 
 # ------------------------------------------------------------------ widget
@@ -54,6 +82,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
         pi.getAxis("left").setWidth(35)
         pi.setYRange(0, 255, padding=0.04)
         pi.disableAutoRange()
+        self._vb = pi.getViewBox()
 
         # Signal lines
         self._line_orig = self.plot(pen=pg.mkPen(_GREEN, width=1.5))
@@ -74,26 +103,36 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._thresh_disp_line.setVisible(False)
 
         # Transition scatter items: rising ▲ and falling ▼, per signal
-        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t")
-        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t2")
-        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t")
-        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t2")
+        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t1")
+        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t")
+        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t1")
+        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t")
         for sc in (self._sc_rise_orig, self._sc_fall_orig, self._sc_rise_disp, self._sc_fall_disp):
             self.addItem(sc)
 
         # Unmatched transition markers (overlaid in red)
-        self._sc_unmatched_rise = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t")
-        self._sc_unmatched_fall = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t2")
+        self._sc_unmatched_rise = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t1")
+        self._sc_unmatched_fall = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t")
         self.addItem(self._sc_unmatched_rise)
         self.addItem(self._sc_unmatched_fall)
 
         # Connector lines linking paired orig→disp markers
         self._pair_connectors = self.plot(pen=pg.mkPen((200, 200, 200, 100), width=1))
 
-        # Playhead
-        self._playhead = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(_YELLOW, width=1))
-        self.addItem(self._playhead)
-        self._playhead.setVisible(False)
+        # Playhead: short thick stalk + triangle anchored to the bottom of
+        # the plot (mirrors TimelineWidget's own playhead shape) instead of
+        # a thin full-height line that gets lost once the graph is busy.
+        self._playhead_stalk = self.plot(x=[0, 0], y=[0, 0], pen=pg.mkPen(_YELLOW, width=3))
+        self._playhead_marker = pg.ScatterPlotItem(
+            x=[0], y=[0], pen=None, brush=pg.mkBrush(_YELLOW),
+            size=_PLAYHEAD_SYMBOL_SIZE, symbol=_PLAYHEAD_SYMBOL,
+        )
+        self.addItem(self._playhead_marker)
+        self._playhead_stalk.setVisible(False)
+        self._playhead_marker.setVisible(False)
+        self._playhead_y0 = 0.0
+        self._playhead_apex_y = 0.0
+        self._playhead_y1 = 0.0
 
         # Data state
         self._in_point  = 0
@@ -153,7 +192,17 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._ydata_max = ymax
         self.setYRange(ymin, ymax, padding=0.1)
         self.setXRange(in_point, in_point + len(orig) - 1, padding=0.01)
-        self._playhead.setVisible(True)
+
+        rng = ymax - ymin
+        view_ymin = self._vb.viewRange()[1][0]     # actual rendered lower bound
+        _, py = self._vb.viewPixelSize()           # data-units per screen pixel, y
+
+        self._playhead_y0 = view_ymin + _PLAYHEAD_EDGE_MARGIN_PX * py
+        self._playhead_apex_y = self._playhead_y0 + _PLAYHEAD_TRI_H_PX * py
+        stalk_reach = 0.12 * rng if rng > 0 else 1.0
+        self._playhead_y1 = self._playhead_apex_y + stalk_reach
+        self._playhead_stalk.setVisible(True)
+        self._playhead_marker.setVisible(True)
 
         self._redetect()
         return self._delta
@@ -179,8 +228,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._apply_polarity()
 
     def set_frame(self, frame: int) -> None:
-        if self._playhead.isVisible():
-            self._playhead.setValue(frame)
+        if self._playhead_marker.isVisible():
+            self._playhead_stalk.setData(x=[frame, frame], y=[self._playhead_apex_y, self._playhead_y1])
+            self._playhead_marker.setData(x=[frame], y=[self._playhead_y0])
 
     def clear_data(self) -> None:
         self._orig_data = self._disp_data = None
@@ -200,7 +250,8 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._pair_connectors.setData(x=[], y=[])
         self._thresh_orig_line.setVisible(False)
         self._thresh_disp_line.setVisible(False)
-        self._playhead.setVisible(False)
+        self._playhead_stalk.setVisible(False)
+        self._playhead_marker.setVisible(False)
         self.setYRange(0, 255, padding=0.04)
         self._n = 0
         self.pairs_updated.emit()
