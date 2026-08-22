@@ -9,6 +9,7 @@ Architecture and data flow are described in DESIGN.md.
 """
 
 import argparse
+import os
 import sys
 
 import cv2
@@ -39,6 +40,7 @@ from PyQt6.QtWidgets import (
 
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
+from core.latency import default_max_latency_frames
 from core.roi import ROI
 from core.video_io import VideoReader
 from ui.brightness_graph import BrightnessGraphWidget
@@ -115,6 +117,7 @@ class MainWindow(QMainWindow):
         # cross-thread signal cannot be un-sent, only ignored.
         self._extraction_session: int = 0
         self._delta_user_set: bool = False
+        self._max_latency_user_set: bool = False
         self._cli_args = None
 
         self._build_ui()
@@ -312,12 +315,20 @@ class MainWindow(QMainWindow):
         self.max_latency_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.max_latency_spin.setEnabled(False)
 
+        self.max_latency_auto_btn = QPushButton("Auto")
+        self.max_latency_auto_btn.setToolTip(
+            "Sets Max Latency to 1/2 the measured period of the test signal."
+        )
+        self.max_latency_auto_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.max_latency_auto_btn.setEnabled(False)
+
         detection_group_layout.addWidget(self.delta_label)
         detection_group_layout.addWidget(self.delta_spin)
         detection_group_layout.addWidget(self.spacing_label)
         detection_group_layout.addWidget(self.spacing_spin)
         detection_group_layout.addWidget(self.max_latency_label)
         detection_group_layout.addWidget(self.max_latency_spin)
+        detection_group_layout.addWidget(self.max_latency_auto_btn)
         detection_group_layout.addStretch()
         layout.addWidget(detection_group)
 
@@ -386,6 +397,7 @@ class MainWindow(QMainWindow):
             "Latency (fr)", "Latency (ms)",
         ])
         self.results_table = QTableView()
+        self.results_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.results_table.setModel(self._results_model)
         self.results_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -435,7 +447,8 @@ class MainWindow(QMainWindow):
         self.polarity_combo.currentIndexChanged.connect(self._on_polarity_changed)
         self.delta_spin.valueChanged.connect(self._on_delta_spin_changed)
         self.spacing_spin.valueChanged.connect(lambda v: self.brightness_graph.set_min_spacing(v))
-        self.max_latency_spin.valueChanged.connect(lambda v: self.brightness_graph.set_max_latency(v))
+        self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
+        self.max_latency_auto_btn.clicked.connect(self._on_max_latency_auto_clicked)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
         self.brightness_graph.pairs_updated.connect(self._update_latency_summary)
         self.brightness_graph.pairs_updated.connect(self._update_results_table)
@@ -485,6 +498,7 @@ class MainWindow(QMainWindow):
         self._stop_extractor()
         self._clear_brightness()
         self._delta_user_set = False
+        self._max_latency_user_set = False
         if self.reader is not None:
             self.reader.release()
         self.reader = new_reader
@@ -846,8 +860,27 @@ class MainWindow(QMainWindow):
         self.delta_spin.setValue(int(effective_delta))
         self.delta_spin.blockSignals(False)
         self.delta_spin.setEnabled(True)
+
+        period_fr = self.brightness_graph.get_orig_period_frames("both")
+        auto_max_latency = default_max_latency_frames(period_fr)
+        if self._cli_args is not None and self._cli_args.max_latency is not None:
+            # CLI value applies to the first analysis only; afterwards it is
+            # the user's spinbox that rules.
+            effective_max_latency = int(self._cli_args.max_latency)
+            self._cli_args.max_latency = None
+            self._max_latency_user_set = True
+        elif self._max_latency_user_set:
+            effective_max_latency = self.max_latency_spin.value()
+        else:
+            effective_max_latency = auto_max_latency
+        self.max_latency_spin.blockSignals(True)
+        self.max_latency_spin.setValue(effective_max_latency)
+        self.max_latency_spin.blockSignals(False)
+        self.brightness_graph.set_max_latency(effective_max_latency)
+
         self.spacing_spin.setEnabled(True)
         self.max_latency_spin.setEnabled(True)
+        self.max_latency_auto_btn.setEnabled(True)
         self.prev_trans_button.setEnabled(True)
         self.next_trans_button.setEnabled(True)
         self.analysis_widget.hide()
@@ -1051,6 +1084,24 @@ class MainWindow(QMainWindow):
         self._delta_user_set = True
         self.brightness_graph.set_delta(float(value))
 
+    def _on_max_latency_spin_changed(self, value: int) -> None:
+        # Same pattern as _on_delta_spin_changed: a user-chosen cap survives
+        # re-analysis; only an untouched spinbox gets the auto-computed value.
+        self._max_latency_user_set = True
+        self.brightness_graph.set_max_latency(value)
+
+    def _on_max_latency_auto_clicked(self) -> None:
+        period_fr = self.brightness_graph.get_orig_period_frames("both")
+        value = default_max_latency_frames(period_fr)
+        # Always mark as a deliberate override, even if the computed value
+        # happens to match what's already shown (setValue alone wouldn't
+        # emit valueChanged, and _max_latency_user_set must still flip).
+        self._max_latency_user_set = True
+        self.max_latency_spin.blockSignals(True)
+        self.max_latency_spin.setValue(value)
+        self.max_latency_spin.blockSignals(False)
+        self.brightness_graph.set_max_latency(value)
+
     def _on_extract_error(self, msg: str, session: int | None = None) -> None:
         if session is not None and session != self._extraction_session:
             return  # stale error from an invalidated session
@@ -1072,6 +1123,8 @@ class MainWindow(QMainWindow):
             self.spacing_spin.setEnabled(False)
         if hasattr(self, "max_latency_spin"):
             self.max_latency_spin.setEnabled(False)
+        if hasattr(self, "max_latency_auto_btn"):
+            self.max_latency_auto_btn.setEnabled(False)
         if hasattr(self, "pairs_label"):
             self.pairs_label.setText("")
         if hasattr(self, "latency_summary_label"):
@@ -1111,9 +1164,15 @@ def _parse_roi(s: str):
         raise argparse.ArgumentTypeError(f"ROI must be x,y,w,h — got: {s!r}")
 
 
+def _existing_file(s: str) -> str:
+    if not os.path.exists(s):
+        raise argparse.ArgumentTypeError(f"video file not found: {s!r}")
+    return s
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Glass-to-Glass Latency Tool")
-    parser.add_argument("file",           nargs="?",         help="Video file to open")
+    parser.add_argument("file",           nargs="?", type=_existing_file, help="Video file to open")
     parser.add_argument("--fps",          type=float,        metavar="FLOAT")
     parser.add_argument("--roi-original", type=_parse_roi,   metavar="x,y,w,h")
     parser.add_argument("--roi-display",  type=_parse_roi,   metavar="x,y,w,h")

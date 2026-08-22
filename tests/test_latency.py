@@ -1,4 +1,4 @@
-from core.latency import LatencyPair, pair_transitions
+from core.latency import LatencyPair, default_max_latency_frames, pair_transitions
 
 
 def frames(pairs):
@@ -68,3 +68,14 @@ class TestPairTransitions:
         pairs, _, ud = pair_transitions([10], [12, 20], "rising")
         assert frames(pairs) == [(10, 12)]
         assert ud == [20]
+
+
+class TestDefaultMaxLatencyFrames:
+    def test_none_period_returns_zero_unlimited(self):
+        assert default_max_latency_frames(None) == 0
+
+    def test_half_of_even_period(self):
+        assert default_max_latency_frames(20.0) == 10
+
+    def test_rounds_to_nearest_frame(self):
+        assert default_max_latency_frames(21.4) == 11

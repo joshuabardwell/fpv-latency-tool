@@ -5,6 +5,7 @@ Extraction runs the real QThread; tests wait for the built-in
 QThread.finished cleanup slot to clear MainWindow._extractor.
 """
 
+import argparse
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ from PyQt6.QtCore import Qt
 
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, _existing_file
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -85,7 +86,7 @@ class TestDeltaThreshold:
     def test_cli_min_delta_applied_once(self, loaded, qtbot):
         """Regression: the CLI value used to clobber the spinbox on every
         re-analysis."""
-        loaded._cli_args = SimpleNamespace(min_delta=60)
+        loaded._cli_args = SimpleNamespace(min_delta=60, max_latency=None)
         analyze(loaded, qtbot)
         assert loaded.delta_spin.value() == 60
         assert loaded._cli_args.min_delta is None
@@ -105,6 +106,85 @@ class TestDeltaThreshold:
         float, so the displayed threshold was not the one in effect."""
         analyze(loaded, qtbot)
         assert float(loaded.delta_spin.value()) == loaded.brightness_graph._delta
+
+
+class TestMaxLatencyDefault:
+    def test_stays_unlimited_when_period_unavailable(self, loaded, qtbot):
+        # synth_video has only 1 rising + 1 falling transition -> no period.
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+
+    def test_auto_value_is_half_orig_period(self, loaded, qtbot, monkeypatch):
+        # Isolate the wiring from real period detection by stubbing the period.
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 10
+
+    def test_cli_max_latency_applied_once(self, loaded, qtbot):
+        loaded._cli_args = SimpleNamespace(min_delta=None, max_latency=7)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 7
+        assert loaded._cli_args.max_latency is None
+
+        loaded.max_latency_spin.setValue(3)  # signals live -> marks user-set
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 3
+
+    def test_cli_max_latency_zero_is_explicit_unlimited(self, loaded, qtbot):
+        loaded._cli_args = SimpleNamespace(min_delta=None, max_latency=0)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+        assert loaded._cli_args.max_latency is None
+        # Re-analyze without new CLI input: must not get silently re-defaulted.
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 0
+
+    def test_user_max_latency_survives_reanalysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(4)
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 4
+
+    def test_fresh_file_load_clears_user_set_flag(self, loaded, qtbot, synth_video):
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(4)
+        assert loaded._max_latency_user_set is True
+        loaded.open_file(synth_video)
+        assert loaded._max_latency_user_set is False
+
+    def test_auto_button_disabled_until_analysis(self, loaded, qtbot):
+        assert loaded.max_latency_auto_btn.isEnabled() is False
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_auto_btn.isEnabled() is True
+
+    def test_auto_button_sets_half_orig_period(self, loaded, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(999)
+        loaded.max_latency_auto_btn.click()
+        assert loaded.max_latency_spin.value() == 10
+        assert loaded.brightness_graph._max_latency == 10
+
+    def test_auto_button_click_counts_as_user_edit(self, loaded, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        loaded.max_latency_auto_btn.click()
+        assert loaded._max_latency_user_set is True
+
+        # Period changes, but a re-analysis must not silently override the
+        # value the Auto button just applied -- it's a one-time snap, not a
+        # standing auto-mode.
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 40.0
+        )
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 10
 
 
 class TestRoiInvalidation:
@@ -195,6 +275,15 @@ class TestCliCommand:
         assert "Warning" in loaded.status_label.text()
         assert "--out-point" in loaded.status_label.text()
 
+    def test_cli_missing_file_rejected(self):
+        """Regression: a bad CLI filename must refuse to run, not launch the
+        GUI anyway with just a status-bar error."""
+        with pytest.raises(argparse.ArgumentTypeError):
+            _existing_file("/nonexistent/nope.mp4")
+
+    def test_cli_existing_file_passes_through(self, synth_video):
+        assert _existing_file(synth_video) == synth_video
+
 
 class TestKeyboardNavigation:
     def test_arrow_steps_frame_via_window(self, loaded, qtbot):
@@ -221,6 +310,13 @@ class TestKeyboardNavigation:
         loaded.show_frame(30)
         qtbot.keyClick(loaded, Qt.Key.Key_O)
         assert loaded.timeline.out_point == 30
+
+    def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot):
+        """Regression: results_table had no focus policy, so QTableView's
+        default StrongFocus let a click steal focus and swallow the
+        keyPressEvent-based navigation shortcuts (arrows, Home/End, I/O, etc.)."""
+        qtbot.mouseClick(loaded.results_table.viewport(), Qt.MouseButton.LeftButton)
+        assert not loaded.results_table.hasFocus()
 
 
 class TestStartupWindowState:

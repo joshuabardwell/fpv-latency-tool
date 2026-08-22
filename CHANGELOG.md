@@ -4,9 +4,17 @@
 
 Findings from a fourth audit round, re-verified against this branch before fixing.
 
+### Added
+- Max Latency now defaults to half the measured Original Period after analysis (was always "unlimited"), reducing the chance of wraparound mis-pairing without requiring manual tuning; an explicit `--max-latency` CLI value or a user edit still takes precedence.
+- "Auto" button next to Max Latency snaps it back to half the measured Original Period on demand, once a CLI value or manual edit has overridden the default.
+- Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
+
 ### Fixed
+- CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
+- Luminance graph's rise/fall transition markers now use the correct pyqtgraph triangle symbols (rise up, fall down), fixing the fall marker rendering as a sideways triangle.
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 - Startup window now sets its geometry explicitly from the screen's available area instead of relying on `showMaximized()`'s automatic calculation, fixing a multi-monitor Windows quirk where the window reported itself maximized without actually filling the screen.
+- Results table no longer steals keyboard focus on click, which was swallowing arrow-key/Home/End/I/O navigation shortcuts.
 
 ### Changed
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
