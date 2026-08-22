@@ -301,6 +301,13 @@ class TestKeyboardNavigation:
         qtbot.keyClick(loaded, Qt.Key.Key_O)
         assert loaded.timeline.out_point == 30
 
+    def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot):
+        """Regression: results_table had no focus policy, so QTableView's
+        default StrongFocus let a click steal focus and swallow the
+        keyPressEvent-based navigation shortcuts (arrows, Home/End, I/O, etc.)."""
+        qtbot.mouseClick(loaded.results_table.viewport(), Qt.MouseButton.LeftButton)
+        assert not loaded.results_table.hasFocus()
+
 
 class TestStartupWindowState:
     def test_starts_filling_available_screen_geometry(self, window):
