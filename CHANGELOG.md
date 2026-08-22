@@ -6,6 +6,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 
 ### Added
 - Max Latency now defaults to half the measured Original Period after analysis (was always "unlimited"), reducing the chance of wraparound mis-pairing without requiring manual tuning; an explicit `--max-latency` CLI value or a user edit still takes precedence.
+- "Auto" button next to Max Latency snaps it back to half the measured Original Period on demand, once a CLI value or manual edit has overridden the default.
 
 ### Fixed
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.

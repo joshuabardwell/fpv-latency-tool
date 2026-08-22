@@ -153,6 +153,38 @@ class TestMaxLatencyDefault:
         loaded.open_file(synth_video)
         assert loaded._max_latency_user_set is False
 
+    def test_auto_button_disabled_until_analysis(self, loaded, qtbot):
+        assert loaded.max_latency_auto_btn.isEnabled() is False
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_auto_btn.isEnabled() is True
+
+    def test_auto_button_sets_half_orig_period(self, loaded, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        loaded.max_latency_spin.setValue(999)
+        loaded.max_latency_auto_btn.click()
+        assert loaded.max_latency_spin.value() == 10
+        assert loaded.brightness_graph._max_latency == 10
+
+    def test_auto_button_click_counts_as_user_edit(self, loaded, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 20.0
+        )
+        analyze(loaded, qtbot)
+        loaded.max_latency_auto_btn.click()
+        assert loaded._max_latency_user_set is True
+
+        # Period changes, but a re-analysis must not silently override the
+        # value the Auto button just applied -- it's a one-time snap, not a
+        # standing auto-mode.
+        monkeypatch.setattr(
+            loaded.brightness_graph, "get_orig_period_frames", lambda polarity: 40.0
+        )
+        analyze(loaded, qtbot)
+        assert loaded.max_latency_spin.value() == 10
+
 
 class TestRoiInvalidation:
     def test_undo_clears_stale_results(self, loaded, qtbot):

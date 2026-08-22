@@ -314,12 +314,20 @@ class MainWindow(QMainWindow):
         self.max_latency_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.max_latency_spin.setEnabled(False)
 
+        self.max_latency_auto_btn = QPushButton("Auto")
+        self.max_latency_auto_btn.setToolTip(
+            "Sets Max Latency to 1/2 the measured period of the test signal."
+        )
+        self.max_latency_auto_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.max_latency_auto_btn.setEnabled(False)
+
         detection_group_layout.addWidget(self.delta_label)
         detection_group_layout.addWidget(self.delta_spin)
         detection_group_layout.addWidget(self.spacing_label)
         detection_group_layout.addWidget(self.spacing_spin)
         detection_group_layout.addWidget(self.max_latency_label)
         detection_group_layout.addWidget(self.max_latency_spin)
+        detection_group_layout.addWidget(self.max_latency_auto_btn)
         detection_group_layout.addStretch()
         layout.addWidget(detection_group)
 
@@ -438,6 +446,7 @@ class MainWindow(QMainWindow):
         self.delta_spin.valueChanged.connect(self._on_delta_spin_changed)
         self.spacing_spin.valueChanged.connect(lambda v: self.brightness_graph.set_min_spacing(v))
         self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
+        self.max_latency_auto_btn.clicked.connect(self._on_max_latency_auto_clicked)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
         self.brightness_graph.pairs_updated.connect(self._update_latency_summary)
         self.brightness_graph.pairs_updated.connect(self._update_results_table)
@@ -869,6 +878,7 @@ class MainWindow(QMainWindow):
 
         self.spacing_spin.setEnabled(True)
         self.max_latency_spin.setEnabled(True)
+        self.max_latency_auto_btn.setEnabled(True)
         self.prev_trans_button.setEnabled(True)
         self.next_trans_button.setEnabled(True)
         self.analysis_widget.hide()
@@ -1078,6 +1088,18 @@ class MainWindow(QMainWindow):
         self._max_latency_user_set = True
         self.brightness_graph.set_max_latency(value)
 
+    def _on_max_latency_auto_clicked(self) -> None:
+        period_fr = self.brightness_graph.get_orig_period_frames("both")
+        value = default_max_latency_frames(period_fr)
+        # Always mark as a deliberate override, even if the computed value
+        # happens to match what's already shown (setValue alone wouldn't
+        # emit valueChanged, and _max_latency_user_set must still flip).
+        self._max_latency_user_set = True
+        self.max_latency_spin.blockSignals(True)
+        self.max_latency_spin.setValue(value)
+        self.max_latency_spin.blockSignals(False)
+        self.brightness_graph.set_max_latency(value)
+
     def _on_extract_error(self, msg: str, session: int | None = None) -> None:
         if session is not None and session != self._extraction_session:
             return  # stale error from an invalidated session
@@ -1099,6 +1121,8 @@ class MainWindow(QMainWindow):
             self.spacing_spin.setEnabled(False)
         if hasattr(self, "max_latency_spin"):
             self.max_latency_spin.setEnabled(False)
+        if hasattr(self, "max_latency_auto_btn"):
+            self.max_latency_auto_btn.setEnabled(False)
         if hasattr(self, "pairs_label"):
             self.pairs_label.setText("")
         if hasattr(self, "latency_summary_label"):

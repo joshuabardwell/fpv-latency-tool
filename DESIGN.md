@@ -107,7 +107,10 @@ single frame-to-frame brightness step exceeds delta. Consequences:
   pairing search window so a missed display transition doesn't chain-shift all
   later pairs. Max Latency auto-computes to half the mean Original Period
   after analysis (0/"unlimited" if fewer than 2 original transitions were
-  detected), following the same auto/user/CLI-override pattern as delta.
+  detected), following the same auto/user/CLI-override pattern as delta. An
+  "Auto" button next to the spinbox recomputes and re-applies that value
+  on demand; the click itself counts as a user edit, so it's a one-time
+  snap rather than a standing auto mode.
 
 ## Frame-accuracy caveats
 
