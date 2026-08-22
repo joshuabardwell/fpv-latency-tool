@@ -351,6 +351,14 @@ class BrightnessGraphWidget(pg.PlotWidget):
             result.extend(self._fall_pairs)
         return sorted(result, key=lambda p: p.orig_frame)
 
+    def get_pairs_for(self, polarity: str, *, active: str | None = None) -> list[LatencyPair]:
+        """Returns this polarity's pairs ('rising' or 'falling'), or [] if
+        `active` (defaults to the live polarity filter) hides that polarity."""
+        gate = self._polarity if active is None else active
+        if gate not in ("both", polarity):
+            return []
+        return self._rise_pairs if polarity == "rising" else self._fall_pairs
+
     def get_orig_period_frames(self, polarity: str) -> float | None:
         """Average frame-spacing between consecutive same-polarity original transitions.
         Uses rising if polarity is 'both' or 'rising', falling otherwise."""
