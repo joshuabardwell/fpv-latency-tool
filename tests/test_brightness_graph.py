@@ -1,3 +1,4 @@
+import numpy as np
 from pyqtgraph.graphicsItems.ScatterPlotItem import Symbols
 
 from ui.brightness_graph import BrightnessGraphWidget
@@ -31,3 +32,103 @@ class TestBrightnessGraphTransitionSymbols:
             assert _apex_is_up(item.opts["symbol"])
         for item in fall_items:
             assert not _apex_is_up(item.opts["symbol"])
+
+
+class TestOrigPeriod:
+    def test_none_with_fewer_than_two_transitions(self, qtbot):
+        g = make_graph(qtbot)
+        orig = np.array([20.0, 20.0, 220.0, 220.0], dtype=np.float64)
+        disp = np.array([20.0, 20.0, 20.0, 220.0], dtype=np.float64)
+        g.set_data(orig, disp, in_point=0)
+        assert g.get_orig_period_frames("both") is None
+
+    def test_mean_period_across_multiple_rising_transitions(self, qtbot):
+        g = make_graph(qtbot)
+        # Two full cycles: rising edges land 10 frames apart (frames 5, 15).
+        orig = np.array([20.0] * 5 + [220.0] * 5 + [20.0] * 5 + [220.0] * 5, dtype=np.float64)
+        disp = orig.copy()
+        g.set_data(orig, disp, in_point=0)
+        assert g.get_orig_period_frames("both") == 10.0
+
+    def test_falling_only_when_polarity_falling(self, qtbot):
+        g = make_graph(qtbot)
+        # Irregular timing so rising-period != falling-period, proving the
+        # "falling" branch reads the fall list rather than falling back to
+        # the (different-valued) rise list.
+        # Rising transitions at frames 5, 15, 30 (mean gap 12.5).
+        # Falling transitions at frames 10, 20 (mean gap 10.0).
+        orig = np.array(
+            [20.0] * 5 + [220.0] * 5 + [20.0] * 5 + [220.0] * 5 + [20.0] * 10 + [220.0] * 5,
+            dtype=np.float64,
+        )
+        disp = orig.copy()
+        g.set_data(orig, disp, in_point=0)
+        assert g.get_orig_period_frames("both") == 12.5
+        assert g.get_orig_period_frames("falling") == 10.0
+
+
+class TestBrightnessGraphPlayhead:
+    def test_playhead_symbol_points_up_and_matches_timeline_size(self):
+        """Locks in bug #1 (was pointing down) and #2 (was 16x16, timeline
+        is 10x7) directly against the symbol geometry, independent of any
+        widget/ViewBox state."""
+        from ui.brightness_graph import (
+            _PLAYHEAD_SYMBOL, _PLAYHEAD_SYMBOL_SIZE,
+            _PLAYHEAD_TRI_BASE_PX, _PLAYHEAD_TRI_H_PX,
+        )
+        rect = _PLAYHEAD_SYMBOL.boundingRect()
+        # Apex (min local y) is above the base (max local y) -- points up.
+        assert rect.top() < 0.0 <= rect.bottom()
+        # Rendered pixel footprint matches TimelineWidget's playhead triangle.
+        assert round(rect.width() * _PLAYHEAD_SYMBOL_SIZE) == _PLAYHEAD_TRI_BASE_PX
+        assert round(rect.height() * _PLAYHEAD_SYMBOL_SIZE) == _PLAYHEAD_TRI_H_PX
+
+    def test_hidden_before_data_loaded(self, qtbot):
+        g = make_graph(qtbot)
+        assert not g._playhead_marker.isVisible()
+        assert not g._playhead_stalk.isVisible()
+
+    def test_visible_and_positioned_after_set_data(self, qtbot):
+        g = make_graph(qtbot)
+        # A real ViewBox pixel geometry is required for the playhead's
+        # pixel->data-unit math (ViewBox.viewPixelSize()) to be meaningful --
+        # an unshown widget reports a stale/default ViewBox rect.
+        g.resize(400, g.height())
+        g.show()
+        qtbot.waitExposed(g)
+
+        orig = np.array([20.0, 20.0, 220.0, 220.0], dtype=np.float64)
+        disp = np.array([20.0, 20.0, 20.0, 220.0], dtype=np.float64)
+        g.set_data(orig, disp, in_point=100)
+
+        assert g._playhead_marker.isVisible()
+        assert g._playhead_stalk.isVisible()
+
+        g.set_frame(102)
+        marker_x, marker_y = g._playhead_marker.getData()
+        stalk_x, stalk_y = g._playhead_stalk.getData()
+        assert list(marker_x) == [102]
+        assert list(stalk_x) == [102, 102]
+
+        # Marker's plotted point is still the triangle's BASE.
+        assert marker_y[0] == g._playhead_y0
+
+        # Stalk now starts at the triangle's APEX, strictly above the base --
+        # it must not pass back down through the triangle body (bug #3).
+        assert stalk_y[0] == g._playhead_apex_y
+        assert g._playhead_y1 > stalk_y[0] > g._playhead_y0
+        assert stalk_y[1] == g._playhead_y1
+
+        # The triangle's base sits inside the ViewBox's rendered range, with
+        # a strict safety margin above the lower edge -- not clipped (bug #4).
+        view_ymin, view_ymax = g.getPlotItem().getViewBox().viewRange()[1]
+        assert view_ymin < g._playhead_y0 < view_ymax
+
+    def test_hidden_again_after_clear_data(self, qtbot):
+        g = make_graph(qtbot)
+        orig = np.array([20.0, 220.0], dtype=np.float64)
+        disp = np.array([20.0, 220.0], dtype=np.float64)
+        g.set_data(orig, disp, in_point=0)
+        g.clear_data()
+        assert not g._playhead_marker.isVisible()
+        assert not g._playhead_stalk.isVisible()
