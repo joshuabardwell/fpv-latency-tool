@@ -10,6 +10,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
 
 ### Fixed
+- Luminance graph's rise/fall transition markers now use the correct pyqtgraph triangle symbols (rise up, fall down), fixing the fall marker rendering as a sideways triangle.
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 - Startup window now sets its geometry explicitly from the screen's available area instead of relying on `showMaximized()`'s automatic calculation, fixing a multi-monitor Windows quirk where the window reported itself maximized without actually filling the screen.
 - Results table no longer steals keyboard focus on click, which was swallowing arrow-key/Home/End/I/O navigation shortcuts.

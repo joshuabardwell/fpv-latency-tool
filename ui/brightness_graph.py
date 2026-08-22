@@ -103,16 +103,16 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._thresh_disp_line.setVisible(False)
 
         # Transition scatter items: rising ▲ and falling ▼, per signal
-        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t")
-        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t2")
-        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t")
-        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t2")
+        self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t1")
+        self._sc_fall_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t")
+        self._sc_rise_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t1")
+        self._sc_fall_disp = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_AMBER), size=9, symbol="t")
         for sc in (self._sc_rise_orig, self._sc_fall_orig, self._sc_rise_disp, self._sc_fall_disp):
             self.addItem(sc)
 
         # Unmatched transition markers (overlaid in red)
-        self._sc_unmatched_rise = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t")
-        self._sc_unmatched_fall = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t2")
+        self._sc_unmatched_rise = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t1")
+        self._sc_unmatched_fall = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t")
         self.addItem(self._sc_unmatched_rise)
         self.addItem(self._sc_unmatched_fall)
 
