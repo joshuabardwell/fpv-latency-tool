@@ -5,10 +5,12 @@
 Findings from a fourth audit round, re-verified against this branch before fixing.
 
 ### Added
+- Zoom/pan on the brightness graph's X axis: a Premiere-style zoom bar above the timeline, with draggable end-handles and a draggable middle bar, plus scroll-wheel zoom and click-drag pan directly on the graph. The zoomed window recenters on the playhead as it moves (including during playback) and resets to 100% on double-click or a new analysis.
 - Max Latency now defaults to half the measured Original Period after analysis (was always "unlimited"), reducing the chance of wraparound mis-pairing without requiring manual tuning; an explicit `--max-latency` CLI value or a user edit still takes precedence.
 - "Auto" button next to Max Latency snaps it back to half the measured Original Period on demand, once a CLI value or manual edit has overridden the default.
 - Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
 - Esc now cancels a running analysis, same as clicking the Cancel button.
+- "<< Unmatched" / "Unmatched >>" buttons jump the playhead between unmatched transitions (shown red on the graph) without stepping through every matched pair in between.
 
 ### Fixed
 - CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
@@ -18,6 +20,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Results table no longer steals keyboard focus on click, which was swallowing arrow-key/Home/End/I/O navigation shortcuts.
 
 ### Changed
+- Frame/Transition/Unmatched navigation buttons now use a uniform `<< Word` / `Word >>` label convention and are stacked vertically beside the timeline (Transition nearest the graph, Frame nearest the timeline) instead of laid out in a single horizontal row, shrinking the scrub bar's width.
 - `BrightnessGraphWidget.set_data` computes each array's min/max once instead of redundantly rescanning for the threshold, delta, and Y-range calculations.
 - Brightness graph transition markers use a darker shade than their line, and the line now paints solid through each marker instead of being interrupted by it, so markers stay visible when the line gets noisy near a transition.
 

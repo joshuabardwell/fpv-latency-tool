@@ -326,6 +326,53 @@ class TestKeyboardNavigation:
         assert not loaded.results_table.hasFocus()
 
 
+class TestZoomPanWiring:
+    def test_zoom_bar_outer_domain_set_on_open(self, loaded):
+        from tests.conftest import SYNTH_FRAME_COUNT
+        assert loaded.zoom_bar.lo == 0.0
+        assert loaded.zoom_bar.hi == float(SYNTH_FRAME_COUNT - 1)
+
+    def test_zoom_bar_analysis_bounds_follow_graph_domain(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert loaded.zoom_bar.analysis_lo == loaded.brightness_graph._range_lo
+        assert loaded.zoom_bar.analysis_hi == loaded.brightness_graph._range_hi
+        assert (loaded.zoom_bar.visible_start, loaded.zoom_bar.visible_end) == (
+            loaded.zoom_bar.analysis_lo, loaded.zoom_bar.analysis_hi,
+        )
+
+    def test_dragging_bar_handle_updates_graph_visible_range(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        bar = loaded.zoom_bar
+        bar.resize(400, bar.height())
+        bar._drag_target = "end"
+        bar._apply_drag(bar._frame_to_x(bar.analysis_lo + 5))
+        assert (loaded.brightness_graph._visible_start, loaded.brightness_graph._visible_end) == (
+            bar.visible_start, bar.visible_end,
+        )
+
+    def test_graph_wheel_zoom_updates_bar(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        g = loaded.brightness_graph
+        anchor = (g._range_lo + g._range_hi) / 2
+        g._apply_zoom(0.5, anchor)
+        assert (loaded.zoom_bar.visible_start, loaded.zoom_bar.visible_end) == (
+            g._visible_start, g._visible_end,
+        )
+
+    def test_new_analysis_resets_bar_to_full_after_zoom(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        g = loaded.brightness_graph
+        anchor = (g._range_lo + g._range_hi) / 2
+        g._apply_zoom(0.5, anchor)
+        assert (loaded.zoom_bar.visible_start, loaded.zoom_bar.visible_end) != (
+            loaded.zoom_bar.analysis_lo, loaded.zoom_bar.analysis_hi,
+        )
+        analyze(loaded, qtbot)  # re-Analyze
+        assert (loaded.zoom_bar.visible_start, loaded.zoom_bar.visible_end) == (
+            loaded.zoom_bar.analysis_lo, loaded.zoom_bar.analysis_hi,
+        )
+
+
 class TestStartupWindowState:
     def test_starts_filling_available_screen_geometry(self, window):
         """Regression: showMaximized()'s automatic geometry calculation could
@@ -339,3 +386,50 @@ class TestStartupWindowState:
         assert window.windowState() & Qt.WindowState.WindowMaximized
         assert abs(geo.width() - avail.width()) <= 10
         assert abs(geo.height() - avail.height()) <= 10
+
+
+class TestNavButtonLabels:
+    def test_labels_follow_arrow_word_convention(self, window):
+        assert window.prev_button.text() == "<< Frame"
+        assert window.next_button.text() == "Frame >>"
+        assert window.prev_trans_button.text() == "<< Transition"
+        assert window.next_trans_button.text() == "Transition >>"
+        assert window.prev_unmatched_button.text() == "<< Unmatched"
+        assert window.next_unmatched_button.text() == "Unmatched >>"
+
+
+class TestUnmatchedNavButtons:
+    def test_disabled_before_analysis_enabled_after(self, loaded, qtbot):
+        assert not loaded.prev_unmatched_button.isEnabled()
+        assert not loaded.next_unmatched_button.isEnabled()
+        analyze(loaded, qtbot)
+        assert loaded.prev_unmatched_button.isEnabled()
+        assert loaded.next_unmatched_button.isEnabled()
+
+    def test_disabled_again_when_analysis_is_invalidated(self, loaded, qtbot):
+        """Mirrors the existing prev/next_trans_button lifecycle: an ROI
+        change invalidates the completed analysis and clears its results."""
+        analyze(loaded, qtbot)
+        loaded._on_clear_rois()
+        assert not loaded.prev_unmatched_button.isEnabled()
+        assert not loaded.next_unmatched_button.isEnabled()
+
+    def test_next_unmatched_click_moves_playhead_to_unmatched_frame(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.brightness_graph._unmatched_frames = [30]
+        loaded.show_frame(0)
+        qtbot.mouseClick(loaded.next_unmatched_button, Qt.MouseButton.LeftButton)
+        assert loaded.timeline.current_frame == 30
+
+    def test_prev_unmatched_click_moves_playhead_to_unmatched_frame(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.brightness_graph._unmatched_frames = [5]
+        loaded.show_frame(39)
+        qtbot.mouseClick(loaded.prev_unmatched_button, Qt.MouseButton.LeftButton)
+        assert loaded.timeline.current_frame == 5
+
+    def test_click_with_no_unmatched_transitions_is_a_noop(self, loaded, qtbot):
+        analyze(loaded, qtbot)  # the synthetic clip's transitions are all matched
+        loaded.show_frame(10)
+        qtbot.mouseClick(loaded.next_unmatched_button, Qt.MouseButton.LeftButton)
+        assert loaded.timeline.current_frame == 10
