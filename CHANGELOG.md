@@ -11,6 +11,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Luminance graph's playhead is now an upward-pointing triangle+stalk marker (matching the size/shape of the timeline's own playhead triangle, mirrored to point up) anchored to the bottom of the plot, replacing the thin `InfiniteLine` that was easy to lose once the graph got busy.
 - Esc now cancels a running analysis, same as clicking the Cancel button.
 - "<< Unmatched" / "Unmatched >>" buttons jump the playhead between unmatched transitions (shown red on the graph) without stepping through every matched pair in between.
+- Matched transition pairs highlight (a white ring around each marker plus a brightened connector segment) when the playhead lands on one of the pair's frames, or when the mouse hovers a matched marker directly; unmatched markers never highlight.
 
 ### Fixed
 - CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
