@@ -14,6 +14,19 @@ class LatencyPair:
         return self.delta_frames() / fps * 1000.0
 
 
+DEFAULT_MAX_LATENCY_FRACTION = 0.5  # fraction of Original Period used as the Max Latency default
+
+
+def default_max_latency_frames(orig_period_frames: float | None) -> int:
+    """Suggested Max Latency cap, in frames: half the mean Original Period.
+    Bounds pairing to roughly one half-cycle so a source transition can't be
+    mismatched to the wrong cycle's display transition. Returns 0 (unlimited)
+    when the period is unknown (fewer than 2 original transitions detected)."""
+    if orig_period_frames is None:
+        return 0
+    return round(DEFAULT_MAX_LATENCY_FRACTION * orig_period_frames)
+
+
 def pair_transitions(
     orig_frames: list[int],
     disp_frames: list[int],
