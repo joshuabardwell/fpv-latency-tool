@@ -24,7 +24,7 @@ Transition markers:
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QPainterPath
 
 from core.detection import apply_min_spacing, find_falling, find_rising
@@ -87,20 +87,6 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # Signal lines
         self._line_orig = self.plot(pen=pg.mkPen(_GREEN, width=1.5))
         self._line_disp = self.plot(pen=pg.mkPen(_AMBER, width=1.5))
-
-        # Non-interactive reference lines at each signal's midpoint
-        self._thresh_orig_line = pg.InfiniteLine(
-            pos=128, angle=0,
-            pen=pg.mkPen((*_GREEN, 140), width=1, style=Qt.PenStyle.DashLine),
-        )
-        self._thresh_disp_line = pg.InfiniteLine(
-            pos=128, angle=0,
-            pen=pg.mkPen((*_AMBER, 140), width=1, style=Qt.PenStyle.DashLine),
-        )
-        self.addItem(self._thresh_orig_line)
-        self.addItem(self._thresh_disp_line)
-        self._thresh_orig_line.setVisible(False)
-        self._thresh_disp_line.setVisible(False)
 
         # Transition scatter items: rising ▲ and falling ▼, per signal
         self._sc_rise_orig = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_GREEN), size=9, symbol="t1")
@@ -178,13 +164,6 @@ class BrightnessGraphWidget(pg.PlotWidget):
         orig_min, orig_max = float(orig.min()), float(orig.max())
         disp_min, disp_max = float(disp.min()), float(disp.max())
 
-        thresh_o = (orig_min + orig_max) / 2 if len(orig) > 1 else 128.0
-        thresh_d = (disp_min + disp_max) / 2 if len(disp) > 1 else 128.0
-        self._thresh_orig_line.setValue(thresh_o)
-        self._thresh_disp_line.setValue(thresh_d)
-        self._thresh_orig_line.setVisible(True)
-        self._thresh_disp_line.setVisible(True)
-
         ymin = min(orig_min, disp_min)
         ymax = max(orig_max, disp_max)
         self._delta = max(5.0, 0.1 * (ymax - ymin))
@@ -248,8 +227,6 @@ class BrightnessGraphWidget(pg.PlotWidget):
                    self._sc_unmatched_rise, self._sc_unmatched_fall):
             sc.setData(x=[], y=[])
         self._pair_connectors.setData(x=[], y=[])
-        self._thresh_orig_line.setVisible(False)
-        self._thresh_disp_line.setVisible(False)
         self._playhead_stalk.setVisible(False)
         self._playhead_marker.setVisible(False)
         self.setYRange(0, 255, padding=0.04)
