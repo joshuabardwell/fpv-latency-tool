@@ -64,6 +64,147 @@ class TestBrightnessGraphMarkerContrast:
         assert sum(_AMBER_MARKER) < sum(_AMBER)
 
 
+def load_graph_with_pairs(qtbot):
+    """Two matched pairs (rising orig@5/disp@7, falling orig@10/disp@12) and
+    two unmatched orig transitions (rising@15, falling@20) -- disp never
+    mirrors the second cycle. Shown+resized so ViewBox pixel geometry is
+    meaningful for hover hit-testing."""
+    g = make_graph(qtbot)
+    g.resize(400, g.height())
+    g.show()
+    qtbot.waitExposed(g)
+    orig = np.array(
+        [20.0] * 5 + [220.0] * 5 + [20.0] * 5 + [220.0] * 5 + [20.0] * 5,
+        dtype=np.float64,
+    )
+    disp = np.array(
+        [20.0] * 7 + [220.0] * 5 + [20.0] * 13,
+        dtype=np.float64,
+    )
+    g.set_data(orig, disp, in_point=0)
+    return g
+
+
+def _marker_widget_pos(g, frame, side):
+    from PyQt6.QtCore import QPointF
+    data = g._orig_data if side == "orig" else g._disp_data
+    y = float(data[frame - g._in_point])
+    return g.mapFromScene(g._vb.mapViewToScene(QPointF(frame, y)))
+
+
+class TestMarkerHighlight:
+    def test_pairs_and_unmatched_detected_as_expected(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        assert set(g._frame_to_pair.keys()) == {5, 7, 10, 12}
+        assert g._frame_to_pair[5].disp_frame == 7
+        assert g._frame_to_pair[10].disp_frame == 12
+        assert g._unmatched_frames == [15, 20]
+
+    def test_resolve_highlight_pair_hover_wins_over_playhead(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g._current_frame = 10          # matched falling pair
+        g._hover_matched_frame = 5     # different matched rising pair
+        assert g._resolve_highlight_pair().orig_frame == 5
+
+    def test_resolve_highlight_pair_falls_back_to_playhead(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g._current_frame = 10
+        g._hover_matched_frame = None
+        assert g._resolve_highlight_pair().orig_frame == 10
+
+    def test_resolve_highlight_pair_none_when_neither_matched(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g._current_frame = 15  # unmatched
+        g._hover_matched_frame = None
+        assert g._resolve_highlight_pair() is None
+
+    def test_update_marker_highlight_sets_both_items(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g._current_frame = 5
+        g._update_marker_highlight()
+        xs, ys = g._sc_highlight.getData()
+        assert sorted(xs) == [5, 7]
+        cxs, cys = g._connector_highlight.getData()
+        assert sorted(cxs) == [5, 7]
+        assert cys[0] == cys[1] == g._connector_y_level
+
+    def test_update_marker_highlight_clears_when_no_pair(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g._current_frame = 5
+        g._update_marker_highlight()
+        g._current_frame = 15  # unmatched
+        g._update_marker_highlight()
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 0
+        cxs, _ = g._connector_highlight.getData()
+        assert cxs is None
+
+    def test_set_frame_on_matched_frame_highlights_it(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        xs, _ = g._sc_highlight.getData()
+        assert sorted(xs) == [5, 7]
+
+    def test_set_frame_on_unmatched_frame_clears_highlight(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        g.set_frame(15)
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 0
+
+    def test_hover_hit_test_finds_matched_marker(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 5, "orig")
+        assert g._hover_hit_test(pos) == 5
+
+    def test_hover_hit_test_ignores_unmatched_marker(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 15, "orig")  # unmatched -- not in _frame_to_pair
+        assert g._hover_hit_test(pos) is None
+
+    def test_hover_hit_test_none_far_from_anything(self, qtbot):
+        from PyQt6.QtCore import QPointF
+        g = load_graph_with_pairs(qtbot)
+        assert g._hover_hit_test(QPointF(-1000, -1000)) is None
+
+    def test_update_hover_sets_hover_state_and_highlight(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 5, "orig")
+        g._update_hover(pos)
+        assert g._hover_matched_frame == 5
+        xs, _ = g._sc_highlight.getData()
+        assert sorted(xs) == [5, 7]
+
+    def test_leave_event_clears_hover(self, qtbot):
+        from PyQt6.QtCore import QEvent
+        g = load_graph_with_pairs(qtbot)
+        g._hover_matched_frame = 5
+        g._update_marker_highlight()
+        g.leaveEvent(QEvent(QEvent.Type.Leave))
+        assert g._hover_matched_frame is None
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 0
+
+    def test_polarity_change_clears_stale_highlight(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)  # highlights the rising pair
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 2
+        g.set_polarity("falling")  # rising pair no longer active
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 0
+
+    def test_clear_data_resets_highlight_state(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        g.clear_data()
+        assert g._frame_to_pair == {}
+        assert g._current_frame is None
+        assert g._hover_matched_frame is None
+        xs, _ = g._sc_highlight.getData()
+        assert len(xs) == 0
+
+
 class TestUnmatchedNavigation:
     def test_apply_polarity_populates_unmatched_frames_from_real_detection(self, qtbot):
         """orig has a second rising/falling cycle that disp never mirrors, so

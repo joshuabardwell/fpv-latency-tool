@@ -22,9 +22,11 @@ Transition markers:
   ▼ triangle-down = light → dark (falling)
 """
 
+import math
+
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QPainterPath
 
 from core.detection import apply_min_spacing, find_falling, find_rising
@@ -33,11 +35,13 @@ from core.view_range import MIN_ZOOM_FRAMES, center_range, clamp_range, pan_rang
 
 _WHEEL_ZOOM_IN  = 0.85          # per-notch scale factor when zooming in
 _WHEEL_ZOOM_OUT = 1.0 / _WHEEL_ZOOM_IN
+_HOVER_HIT_R_PX = 10            # hover hit-test radius around a matched marker
 
-_GREEN  = (0, 230, 0)
-_AMBER  = (255, 160, 0)
-_YELLOW = (255, 204, 0)
-_RED    = (220, 50, 50)
+_GREEN     = (0, 230, 0)
+_AMBER     = (255, 160, 0)
+_YELLOW    = (255, 204, 0)
+_RED       = (220, 50, 50)
+_HIGHLIGHT = (255, 255, 255)
 
 # Darker tints for transition markers, distinct from the line colors above
 # so a marker doesn't disappear into a noisy/jittery line of the same hue.
@@ -121,6 +125,17 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # Connector lines linking paired orig→disp markers
         self._pair_connectors = self.plot(pen=pg.mkPen((200, 200, 200, 100), width=1))
 
+        # Highlight overlay for the matched pair under the playhead/cursor:
+        # a ring around each of its two markers, plus a brightened connector
+        # segment. Layered above everything (lines=1, markers=0 by default).
+        self._sc_highlight = pg.ScatterPlotItem(
+            pen=pg.mkPen(_HIGHLIGHT, width=2), brush=None, size=18, symbol="o",
+        )
+        self._sc_highlight.setZValue(2)
+        self.addItem(self._sc_highlight)
+        self._connector_highlight = self.plot(pen=pg.mkPen(_HIGHLIGHT, width=3))
+        self._connector_highlight.setZValue(2)
+
         # Playhead: short thick stalk + triangle anchored to the bottom of
         # the plot (mirrors TimelineWidget's own playhead shape) instead of
         # a thin full-height line that gets lost once the graph is busy.
@@ -175,6 +190,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._polarity = "both"
         self._transition_frames: list[int] = []
         self._unmatched_frames: list[int] = []
+
+        # Matched-pair highlight (playhead-on-marker or marker hover)
+        self._frame_to_pair: dict[int, LatencyPair] = {}
+        self._current_frame: int | None = None
+        self._hover_matched_frame: int | None = None
+        self._connector_y_level: float = 0.0
 
     # ------------------------------------------------------------------ public
 
@@ -247,6 +268,8 @@ class BrightnessGraphWidget(pg.PlotWidget):
             self.set_visible_range(*center_range(
                 frame, width, self._range_lo, self._range_hi, MIN_ZOOM_FRAMES,
             ))
+            self._current_frame = frame
+            self._update_marker_highlight()
 
     def set_visible_range(self, start: float, end: float) -> None:
         """Set the graph's visible X window (zoom/pan), clamped to the
@@ -284,6 +307,11 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._n = 0
         self._range_lo = self._range_hi = 0.0
         self._visible_start = self._visible_end = 0.0
+        self._frame_to_pair = {}
+        self._current_frame = None
+        self._hover_matched_frame = None
+        self._sc_highlight.setData(x=[], y=[])
+        self._connector_highlight.setData(x=[], y=[])
         self.domain_changed.emit(0.0, -1.0)
         self.pairs_updated.emit()
 
@@ -378,6 +406,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
             self._pan_drag_start_screen_x = event.position().x()
             self._pan_drag_start_range = (self._visible_start, self._visible_end)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._hover_matched_frame is not None:
+                self._hover_matched_frame = None
+                self._update_marker_highlight()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -390,6 +421,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
             return
         if self._range_hi > self._range_lo:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._update_hover(event.position())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -399,6 +431,56 @@ class BrightnessGraphWidget(pg.PlotWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_matched_frame is not None:
+            self._hover_matched_frame = None
+            self._update_marker_highlight()
+        super().leaveEvent(event)
+
+    def _update_hover(self, pos) -> None:
+        frame = self._hover_hit_test(pos) if self._orig_data is not None else None
+        if frame != self._hover_matched_frame:
+            self._hover_matched_frame = frame
+            self._update_marker_highlight()
+
+    def _hover_hit_test(self, pos) -> int | None:
+        """pos: widget-local QPointF (mouseMoveEvent's event.position()).
+        Returns the nearest matched frame within a pixel hit radius, or None."""
+        if not self._frame_to_pair:
+            return None
+        best_frame, best_dist = None, _HOVER_HIT_R_PX
+        for frame, pair in self._frame_to_pair.items():
+            data = self._orig_data if frame == pair.orig_frame else self._disp_data
+            y = float(data[frame - self._in_point])
+            widget_pt = self.mapFromScene(self._vb.mapViewToScene(QPointF(frame, y)))
+            dist = math.hypot(widget_pt.x() - pos.x(), widget_pt.y() - pos.y())
+            if dist < best_dist:
+                best_frame, best_dist = frame, dist
+        return best_frame
+
+    def _resolve_highlight_pair(self) -> LatencyPair | None:
+        if self._hover_matched_frame is not None:
+            pair = self._frame_to_pair.get(self._hover_matched_frame)
+            if pair is not None:
+                return pair
+        if self._current_frame is not None:
+            return self._frame_to_pair.get(self._current_frame)
+        return None
+
+    def _update_marker_highlight(self) -> None:
+        pair = self._resolve_highlight_pair()
+        if pair is None or self._orig_data is None or self._disp_data is None:
+            self._sc_highlight.setData(x=[], y=[])
+            self._connector_highlight.setData(x=[], y=[])
+            return
+        y_orig = float(self._orig_data[pair.orig_frame - self._in_point])
+        y_disp = float(self._disp_data[pair.disp_frame - self._in_point])
+        self._sc_highlight.setData(x=[pair.orig_frame, pair.disp_frame], y=[y_orig, y_disp])
+        self._connector_highlight.setData(
+            x=[pair.orig_frame, pair.disp_frame],
+            y=[self._connector_y_level, self._connector_y_level],
+        )
 
     def _apply_pan_drag(self, dx_px: float) -> None:
         """dx_px: horizontal mouse movement in screen pixels since the drag
@@ -476,6 +558,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
             active_pairs.extend(self._fall_pairs)
         self._update_connectors(active_pairs)
 
+        self._frame_to_pair = {}
+        for p in active_pairs:
+            self._frame_to_pair[p.orig_frame] = p
+            self._frame_to_pair[p.disp_frame] = p
+        self._update_marker_highlight()
+
         self.pairs_updated.emit()
 
     def _populate(self, frame_list: list[int], data: np.ndarray, item: pg.ScatterPlotItem) -> None:
@@ -512,11 +600,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
             item.setData(x=[], y=[])
 
     def _update_connectors(self, pairs: list[LatencyPair]) -> None:
+        rng = self._ydata_max - self._ydata_min
+        self._connector_y_level = self._ydata_max + rng * 0.06
         if not pairs:
             self._pair_connectors.setData(x=[], y=[])
             return
-        rng = self._ydata_max - self._ydata_min
-        y_level = self._ydata_max + rng * 0.06
+        y_level = self._connector_y_level
         xs: list[float] = []
         ys: list[float] = []
         for p in pairs:
