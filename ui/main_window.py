@@ -386,6 +386,7 @@ class MainWindow(QMainWindow):
             "Latency (fr)", "Latency (ms)",
         ])
         self.results_table = QTableView()
+        self.results_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.results_table.setModel(self._results_model)
         self.results_table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
