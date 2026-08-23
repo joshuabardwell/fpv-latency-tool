@@ -465,8 +465,9 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
-        result_columns = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)", "Exclude"]
-        self._exclude_col = len(result_columns) - 1
+        result_columns = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        self._exclude_col = result_columns.index("Exclude")
+        self._orig_frame_col = result_columns.index("Original Frame")
 
         rise_panel = self._build_results_table("Dark To Light Transitions", result_columns)
         self.rise_results_container = rise_panel.container
@@ -1082,7 +1083,7 @@ class MainWindow(QMainWindow):
             )
 
     def _on_results_row_clicked(self, index) -> None:
-        value = index.sibling(index.row(), 0).data()  # column 0 = Original Frame
+        value = index.sibling(index.row(), self._orig_frame_col).data()
         if value is not None and self.reader is not None:
             self.show_frame(int(value))
 
@@ -1194,11 +1195,11 @@ class MainWindow(QMainWindow):
                 Qt.CheckState.Checked if idx in excluded else Qt.CheckState.Unchecked)
             exclude_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             model.appendRow([
+                exclude_item,
                 QStandardItem(str(p.orig_frame)),
                 QStandardItem(str(p.disp_frame)),
                 QStandardItem(str(p.delta_frames())),
                 QStandardItem(f"{p.delta_ms(fps):.1f}"),
-                exclude_item,
             ])
 
     def _populate_summary_model(self, model: QStandardItemModel, pairs: list, fps: float) -> None:

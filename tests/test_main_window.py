@@ -111,8 +111,8 @@ class TestAnalysisLifecycle:
         fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
         assert loaded._rise_results_model.rowCount() == len(rise_pairs) == 1
         assert loaded._fall_results_model.rowCount() == len(fall_pairs) == 1
-        assert int(loaded._rise_results_model.item(0, 0).text()) == rise_pairs[0].orig_frame
-        assert int(loaded._fall_results_model.item(0, 0).text()) == fall_pairs[0].orig_frame
+        assert int(loaded._rise_results_model.item(0, loaded._orig_frame_col).text()) == rise_pairs[0].orig_frame
+        assert int(loaded._fall_results_model.item(0, loaded._orig_frame_col).text()) == fall_pairs[0].orig_frame
 
     def test_results_panels_always_visible(self, loaded, qtbot):
         """Regression: both direction panels stay visible at all times —
@@ -171,7 +171,7 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)", "Exclude"]
+        expected = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
                 model.headerData(c, Qt.Orientation.Horizontal)
@@ -595,7 +595,7 @@ class TestExcludePairs:
         qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
         proxy = loaded.rise_results_table.model()
         assert proxy.rowCount() == 1
-        assert int(proxy.index(0, 0).data()) == loaded.brightness_graph._rise_pairs[1].orig_frame
+        assert int(proxy.index(0, loaded._orig_frame_col).data()) == loaded.brightness_graph._rise_pairs[1].orig_frame
 
     def test_show_excluded_does_not_change_summary_stats(self, loaded, qtbot):
         load_multi_pairs(loaded)
@@ -661,7 +661,7 @@ class TestExcludePairs:
         loaded._rise_results_model.item(2, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
         qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
         assert proxy.rowCount() == 1
-        loaded._on_results_row_clicked(proxy.index(0, 0))
+        loaded._on_results_row_clicked(proxy.index(0, loaded._exclude_col))
         assert loaded.timeline.current_frame == loaded.brightness_graph._rise_pairs[2].orig_frame
 
     def test_buttons_disabled_when_nothing_excluded(self, loaded):
