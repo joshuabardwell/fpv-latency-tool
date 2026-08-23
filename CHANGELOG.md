@@ -14,6 +14,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Matched transition pairs highlight (a white ring around each marker plus a brightened connector segment) when the playhead lands on one of the pair's frames, or when the mouse hovers a matched marker directly; unmatched markers never highlight.
 
 ### Fixed
+- Results table now refreshes live when Min ΔBrightness, Min Spacing, or Max Latency is adjusted after analysis, instead of staying stuck on the previous (possibly empty) matched-pairs state.
 - CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
 - Luminance graph's rise/fall transition markers now use the correct pyqtgraph triangle symbols (rise up, fall down), fixing the fall marker rendering as a sideways triangle.
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
