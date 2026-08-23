@@ -531,6 +531,7 @@ class MainWindow(QMainWindow):
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
         self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
+        self.brightness_graph.pairs_updated.connect(self._update_results_table)
         self.known_period_spin.valueChanged.connect(self._update_fps_verify_row)
         self.show_cli_btn.clicked.connect(self._on_show_cli)
         self.export_csv_btn.clicked.connect(self._on_export_csv)

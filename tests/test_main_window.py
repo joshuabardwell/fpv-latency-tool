@@ -68,6 +68,19 @@ class TestAnalysisLifecycle:
         assert loaded._fall_results_model.rowCount() == 1
         assert loaded.export_csv_btn.isEnabled()
 
+    def test_results_table_refreshes_on_delta_change(self, loaded, qtbot):
+        """Regression: adjusting Min ΔBrightness after analysis must repopulate
+        the results tables live, not leave them stuck on the pre-adjustment
+        (possibly empty) pairing."""
+        loaded.delta_spin.setValue(255)  # exceeds the synthetic clip's max step -> 0 pairs
+        analyze(loaded, qtbot)
+        assert loaded._rise_results_model.rowCount() == 0
+        assert loaded._fall_results_model.rowCount() == 0
+
+        loaded.delta_spin.setValue(30)
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
+
     def test_results_tables_split_by_polarity(self, loaded, qtbot):
         """Regression: rise table must show only rising pairs, fall table only
         falling pairs — no cross-contamination between the two panels."""
