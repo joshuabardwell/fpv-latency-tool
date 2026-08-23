@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QSortFilterProxyModel, Qt, QTimer
 from PyQt6.QtGui import (
+    QBrush,
+    QColor,
     QDragEnterEvent,
     QDropEvent,
     QImage,
@@ -181,6 +183,11 @@ class MainWindow(QMainWindow):
         self._fall_excluded: set[int] = set()
         self._rise_show_excluded_only: bool = False
         self._fall_show_excluded_only: bool = False
+
+        # Results-table row highlight tracking the playhead's matched pair
+        # (see _apply_playhead_highlight). Independent of exclusion state.
+        self._current_playhead_pair = None
+        self._highlighted_row: tuple[QStandardItemModel, int] | None = None
 
         self._build_ui()
         self._wire_events()
@@ -614,6 +621,7 @@ class MainWindow(QMainWindow):
         self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
         self.brightness_graph.pairs_updated.connect(self._on_pairs_rebuilt)
+        self.brightness_graph.playhead_pair_changed.connect(self._on_playhead_pair_changed)
         self.known_period_spin.valueChanged.connect(self._update_fps_verify_row)
         self.show_cli_btn.clicked.connect(self._on_show_cli)
         self.export_csv_btn.clicked.connect(self._on_export_csv)
@@ -1208,6 +1216,59 @@ class MainWindow(QMainWindow):
 
         self._sync_exclude_controls("rising")
         self._sync_exclude_controls("falling")
+
+        self._apply_playhead_highlight()
+
+    def _on_playhead_pair_changed(self, pair) -> None:
+        self._current_playhead_pair = pair
+        self._apply_playhead_highlight()
+
+    def _apply_playhead_highlight(self) -> None:
+        """Tints the results-table row for the playhead's current matched
+        pair (see BrightnessGraphWidget.playhead_pair_changed) and scrolls it
+        into view unless playback is running. Idempotent and safe to call
+        after any table repopulate — always clears first, then re-resolves
+        self._current_playhead_pair fresh against the current table, so it
+        self-heals regardless of whether playhead_pair_changed or a table
+        repopulate happened first."""
+        self._clear_playhead_highlight()
+        pair = self._current_playhead_pair
+        if pair is None:
+            return
+        rise_pairs, fall_pairs, _ = self._current_direction_pairs()
+        if pair.polarity == "rising":
+            model, proxy, table, pairs = (
+                self._rise_results_model, self._rise_results_proxy, self.rise_results_table, rise_pairs)
+        else:
+            model, proxy, table, pairs = (
+                self._fall_results_model, self._fall_results_proxy, self.fall_results_table, fall_pairs)
+        if pair not in pairs:
+            return  # e.g. polarity-gated off from the pinned _results_polarity
+        row = pairs.index(pair)
+        for col in range(model.columnCount()):
+            if col == self._exclude_col:
+                continue  # avoid spuriously re-firing _on_exclude_toggled via itemChanged
+            item = model.item(row, col)
+            if item is not None:
+                item.setBackground(QBrush(QColor(255, 255, 255, 40)))
+        self._highlighted_row = (model, row)
+        if not self._playback_timer.isActive():
+            proxy_index = proxy.mapFromSource(model.index(row, 0))
+            if proxy_index.isValid():
+                table.scrollTo(proxy_index)
+
+    def _clear_playhead_highlight(self) -> None:
+        if self._highlighted_row is None:
+            return
+        model, row = self._highlighted_row
+        if row < model.rowCount():
+            for col in range(model.columnCount()):
+                if col == self._exclude_col:
+                    continue
+                item = model.item(row, col)
+                if item is not None:
+                    item.setData(None, Qt.ItemDataRole.BackgroundRole)
+        self._highlighted_row = None
 
     def _populate_results_model(
         self, model: QStandardItemModel, pairs: list, fps: float, excluded: set[int]

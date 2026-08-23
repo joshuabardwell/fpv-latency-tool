@@ -508,3 +508,57 @@ class TestExcludedPairStyling:
         assert g._sc_rise_orig.data["brush"][0] is None
         exc_x, _ = g._connector_excluded.getData()
         assert not exc_x  # None or empty, depending on pyqtgraph's internal state
+
+
+class TestPlayheadPairSignal:
+    def test_set_frame_on_matched_frame_emits_the_pair(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g.set_frame(5)  # rising pair, orig side
+        assert len(seen) == 1
+        assert seen[0].orig_frame == 5 and seen[0].disp_frame == 7
+
+    def test_set_frame_off_a_match_emits_none(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g.set_frame(15)  # unmatched
+        assert seen == [None]
+
+    def test_set_frame_does_not_re_emit_for_the_same_pair(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g.set_frame(7)  # disp side of the same rising pair
+        assert seen == []
+
+    def test_hover_alone_does_not_emit_playhead_pair_changed(self, qtbot):
+        """Regression: the table highlight is playhead-only by design --
+        hovering a matched marker must not touch it, even though the
+        existing graph ring highlight (_resolve_highlight_pair) does react
+        to hover."""
+        g = load_graph_with_pairs(qtbot)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g._hover_matched_frame = 5
+        g._update_marker_highlight()
+        assert seen == []
+
+    def test_redetect_reemits_when_current_frame_match_changes(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g.set_delta(250)  # far above the 200-unit brightness swing -> 0 pairs
+        assert seen == [None]
+
+    def test_clear_data_emits_none_if_something_was_highlighted(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_frame(5)
+        seen = []
+        g.playhead_pair_changed.connect(lambda p: seen.append(p))
+        g.clear_data()
+        assert seen == [None]
