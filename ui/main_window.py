@@ -580,6 +580,7 @@ class MainWindow(QMainWindow):
         self.fps_reset_btn.clicked.connect(self._reset_fps)
 
         self.timeline.frame_changed.connect(self.show_frame)
+        self.brightness_graph.frame_clicked.connect(self.show_frame)
         self.timeline.in_point_changed.connect(self._on_in_point_changed)
         self.timeline.out_point_changed.connect(self._on_out_point_changed)
 
