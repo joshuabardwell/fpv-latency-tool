@@ -17,7 +17,16 @@ from typing import NamedTuple
 import cv2
 import numpy as np
 from PyQt6.QtCore import QEvent, QObject, QSortFilterProxyModel, Qt, QTimer
-from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import (
+    QDragEnterEvent,
+    QDropEvent,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -30,6 +39,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -135,6 +145,7 @@ class MainWindow(QMainWindow):
         screen = self.screen()
         if screen is not None:
             self.setGeometry(screen.availableGeometry())
+        self.setAcceptDrops(True)
 
         self.reader: VideoReader | None = None
         self._current_frame: np.ndarray | None = None
@@ -653,6 +664,7 @@ class MainWindow(QMainWindow):
             new_reader = VideoReader(path)
         except (FileNotFoundError, IOError) as e:
             self.status_label.setText(f"Error: {e}")
+            QMessageBox.warning(self, "Failed to Open Video", str(e))
             return
 
         self._playback_timer.stop()
@@ -782,6 +794,19 @@ class MainWindow(QMainWindow):
                 label.setText(f"{name.capitalize()}: {b:.1f}")
             else:
                 label.setText(f"{name.capitalize()}: --")
+
+    # ---------------------------------------------------- drag-and-drop
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        local_files = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if not local_files:
+            return
+        event.acceptProposedAction()
+        self.open_file(local_files[0])
 
     # ------------------------------------------------- keyboard shortcuts
 

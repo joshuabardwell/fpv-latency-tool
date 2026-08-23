@@ -5,6 +5,30 @@
 All builds go through [uv](https://docs.astral.sh/uv/getting-started/installation/),
 which installs the right Python and all dependencies automatically.
 
+## Venv location (this repo lives in Dropbox)
+
+This project folder is synced by Dropbox across multiple machines with
+different Python installs. `uv`'s default `.venv` bakes an absolute,
+machine-specific interpreter path into `.venv/pyvenv.cfg` — if that folder
+gets synced to another machine, `uv run`/`uv sync` breaks there (and vice
+versa on the way back).
+
+To avoid this, set a **User** environment variable (once per machine) that
+points `uv` at a venv location outside the Dropbox tree:
+
+```powershell
+# PowerShell, run once per machine
+[Environment]::SetEnvironmentVariable(
+    "UV_PROJECT_ENVIRONMENT",
+    (Join-Path $env:LOCALAPPDATA "uv-venvs\fpv-latency-tool"),
+    "User"
+)
+```
+
+Open a new terminal after setting it, then run `uv sync` to build the venv
+at that location. `pyproject.toml` and `uv.lock` stay in the repo and sync
+fine — only the built `.venv` itself needs to stay off Dropbox.
+
 ## Windows (main target)
 
 The **recommended path is GitHub Actions** — every push builds

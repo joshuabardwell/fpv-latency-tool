@@ -6,11 +6,13 @@ QThread.finished cleanup slot to clear MainWindow._extractor.
 """
 
 import argparse
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
@@ -329,9 +331,10 @@ class TestSessionInvalidation:
         assert loaded._fall_results_model.rowCount() == 0
         assert not loaded.export_csv_btn.isEnabled()
 
-    def test_failed_open_preserves_session(self, loaded, qtbot):
+    def test_failed_open_preserves_session(self, loaded, qtbot, monkeypatch):
         """Regression: a bad path released the current reader before failing,
         bricking scrubbing and wiping results."""
+        monkeypatch.setattr("ui.main_window.QMessageBox.warning", lambda *a, **k: None)
         analyze(loaded, qtbot)
         frames_before = loaded.reader.frame_count
         loaded.open_file("/nonexistent/nope.mp4")
@@ -340,6 +343,85 @@ class TestSessionInvalidation:
         assert loaded._rise_results_model.rowCount() == 1
         assert loaded._fall_results_model.rowCount() == 1
         loaded.show_frame(5)  # reader still usable
+
+    def test_failed_open_shows_message_box(self, loaded, qtbot, monkeypatch):
+        """The status-bar text alone is easy to miss; a bad path (regardless
+        of how open_file() was reached) must also raise a modal dialog."""
+        calls = []
+        monkeypatch.setattr(
+            "ui.main_window.QMessageBox.warning",
+            lambda *a, **k: calls.append(a),
+        )
+        loaded.open_file("/nonexistent/nope.mp4")
+        assert len(calls) == 1
+
+
+class TestDragDropOpen:
+    @staticmethod
+    def _drag_enter_event(mime: QMimeData) -> QDragEnterEvent:
+        event = QDragEnterEvent(
+            QPoint(0, 0),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        # QDragEnterEvent doesn't hold a Python reference to `mime`, only a
+        # raw pointer -- without this, mime is garbage-collected as soon as
+        # this function returns, leaving the event with a dangling pointer
+        # (crashes with an access violation on the next mimeData() access).
+        event._mime = mime
+        return event
+
+    @staticmethod
+    def _drop_event(paths: list[str]) -> QDropEvent:
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        event = QDropEvent(
+            QPointF(0, 0),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        event._mime = mime  # see _drag_enter_event
+        return event
+
+    def test_drag_enter_accepts_local_file(self, window):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile("C:/video.mp4")])
+        event = self._drag_enter_event(mime)
+        window.dragEnterEvent(event)
+        assert event.isAccepted()
+
+    def test_drag_enter_ignores_non_file_data(self, window):
+        mime = QMimeData()
+        mime.setText("hello")
+        event = self._drag_enter_event(mime)
+        window.dragEnterEvent(event)
+        assert not event.isAccepted()
+
+    def test_drop_opens_file(self, window, synth_video):
+        """Dropping a valid video routes through the same open_file() loader
+        as the Open Video button."""
+        event = self._drop_event([synth_video])
+        window.dropEvent(event)
+        assert event.isAccepted()
+        assert window.reader is not None
+        assert window.file_label.text() == Path(synth_video).name
+
+    def test_drop_bad_path_preserves_session(self, loaded, qtbot, monkeypatch):
+        """Same regression as test_failed_open_preserves_session, via drop
+        instead of the dialog/CLI path."""
+        monkeypatch.setattr("ui.main_window.QMessageBox.warning", lambda *a, **k: None)
+        analyze(loaded, qtbot)
+        frames_before = loaded.reader.frame_count
+        event = self._drop_event(["/nonexistent/nope.mp4"])
+        loaded.dropEvent(event)
+        assert "Error" in loaded.status_label.text()
+        assert loaded.reader.frame_count == frames_before
+        assert loaded._rise_results_model.rowCount() == 1
+        assert loaded._fall_results_model.rowCount() == 1
 
 
 class TestCliCommand:
