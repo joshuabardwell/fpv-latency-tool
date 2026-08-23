@@ -48,6 +48,9 @@ _HIGHLIGHT = (255, 255, 255)
 _GREEN_MARKER = (0, 140, 0)
 _AMBER_MARKER = (194, 120, 0)
 
+# Muted gray for a manually-excluded (but still matched) transition marker/connector.
+_MUTED_MARKER = (110, 110, 110)
+
 _PLAYHEAD_SYMBOL_SIZE    = 16  # ScatterPlotItem `size=` -- must be >= 2x the
                                # farthest path point from the anchor (7px here)
                                # or pyqtgraph's own sprite canvas clips it.
@@ -124,6 +127,8 @@ class BrightnessGraphWidget(pg.PlotWidget):
 
         # Connector lines linking paired orig→disp markers
         self._pair_connectors = self.plot(pen=pg.mkPen((200, 200, 200, 100), width=1))
+        # Muted connector for manually-excluded pairs (see set_excluded_pairs)
+        self._connector_excluded = self.plot(pen=pg.mkPen((110, 110, 110, 90), width=1))
 
         # Highlight overlay for the matched pair under the playhead/cursor:
         # a ring around each of its two markers, plus a brightened connector
@@ -196,6 +201,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._current_frame: int | None = None
         self._hover_matched_frame: int | None = None
         self._connector_y_level: float = 0.0
+
+        # Manually-excluded pair indices (into _rise_pairs/_fall_pairs), set by
+        # MainWindow via set_excluded_pairs — pure rendering hint, cleared
+        # implicitly on every redetect since the pairs lists are rebuilt.
+        self._rise_excluded_idx: set[int] = set()
+        self._fall_excluded_idx: set[int] = set()
 
     # ------------------------------------------------------------------ public
 
@@ -301,6 +312,8 @@ class BrightnessGraphWidget(pg.PlotWidget):
                    self._sc_unmatched_rise, self._sc_unmatched_fall):
             sc.setData(x=[], y=[])
         self._pair_connectors.setData(x=[], y=[])
+        self._connector_excluded.setData(x=[], y=[])
+        self._rise_excluded_idx, self._fall_excluded_idx = set(), set()
         self._playhead_stalk.setVisible(False)
         self._playhead_marker.setVisible(False)
         self.setYRange(0, 255, padding=0.04)
@@ -574,12 +587,27 @@ class BrightnessGraphWidget(pg.PlotWidget):
 
         self.pairs_updated.emit()
 
-    def _populate(self, frame_list: list[int], data: np.ndarray, item: pg.ScatterPlotItem) -> None:
+    def _populate(
+        self,
+        frame_list: list[int],
+        data: np.ndarray,
+        item: pg.ScatterPlotItem,
+        normal_brush: tuple[int, int, int] | None = None,
+        excluded_frames: frozenset[int] = frozenset(),
+    ) -> None:
         if frame_list:
-            item.setData(
-                x=frame_list,
-                y=[float(data[f - self._in_point]) for f in frame_list],
-            )
+            y = [float(data[f - self._in_point]) for f in frame_list]
+            if excluded_frames:
+                item.setData(
+                    x=frame_list, y=y,
+                    brush=[pg.mkBrush(_MUTED_MARKER if f in excluded_frames else normal_brush)
+                           for f in frame_list],
+                )
+            else:
+                # No brush= override: falls back to the item's own
+                # construction-time default, which is how a redetect
+                # implicitly resets any excluded-marker styling.
+                item.setData(x=frame_list, y=y)
         else:
             item.setData(x=[], y=[])
 
@@ -607,16 +635,58 @@ class BrightnessGraphWidget(pg.PlotWidget):
         else:
             item.setData(x=[], y=[])
 
-    def _update_connectors(self, pairs: list[LatencyPair]) -> None:
+    def _update_connectors(
+        self, pairs: list[LatencyPair], excluded_idx: frozenset[int] = frozenset()
+    ) -> None:
         rng = self._ydata_max - self._ydata_min
         self._connector_y_level = self._ydata_max + rng * 0.06
-        if not pairs:
-            self._pair_connectors.setData(x=[], y=[])
-            return
         y_level = self._connector_y_level
         xs: list[float] = []
         ys: list[float] = []
-        for p in pairs:
-            xs += [float(p.orig_frame), float(p.disp_frame), float("nan")]
-            ys += [y_level, y_level, float("nan")]
+        exc_xs: list[float] = []
+        exc_ys: list[float] = []
+        for i, p in enumerate(pairs):
+            tx, ty = (exc_xs, exc_ys) if i in excluded_idx else (xs, ys)
+            tx += [float(p.orig_frame), float(p.disp_frame), float("nan")]
+            ty += [y_level, y_level, float("nan")]
         self._pair_connectors.setData(x=xs, y=ys)
+        self._connector_excluded.setData(x=exc_xs, y=exc_ys)
+
+    def set_excluded_pairs(self, rise_excluded_idx: set[int], fall_excluded_idx: set[int]) -> None:
+        """Pure rendering hint from MainWindow: mute markers/connectors for
+        manually-excluded pairs. Must NOT emit pairs_updated — MainWindow
+        clears its exclude sets in response to that signal, so re-emitting
+        here would immediately wipe the sets this call is applying."""
+        self._rise_excluded_idx = set(rise_excluded_idx)
+        self._fall_excluded_idx = set(fall_excluded_idx)
+
+        rise_excluded_frames = {
+            f for i in self._rise_excluded_idx if i < len(self._rise_pairs)
+            for f in (self._rise_pairs[i].orig_frame, self._rise_pairs[i].disp_frame)
+        }
+        fall_excluded_frames = {
+            f for i in self._fall_excluded_idx if i < len(self._fall_pairs)
+            for f in (self._fall_pairs[i].orig_frame, self._fall_pairs[i].disp_frame)
+        }
+        self._populate(self._rise_orig_frames, self._orig_data, self._sc_rise_orig,
+                        _GREEN_MARKER, rise_excluded_frames)
+        self._populate(self._fall_orig_frames, self._orig_data, self._sc_fall_orig,
+                        _GREEN_MARKER, fall_excluded_frames)
+        self._populate(self._rise_disp_frames, self._disp_data, self._sc_rise_disp,
+                        _AMBER_MARKER, rise_excluded_frames)
+        self._populate(self._fall_disp_frames, self._disp_data, self._sc_fall_disp,
+                        _AMBER_MARKER, fall_excluded_frames)
+
+        show_r = self._polarity in ("both", "rising")
+        show_f = self._polarity in ("both", "falling")
+        active_pairs: list[LatencyPair] = []
+        active_excluded: set[int] = set()
+        if show_r:
+            base = len(active_pairs)
+            active_pairs.extend(self._rise_pairs)
+            active_excluded |= {base + i for i in self._rise_excluded_idx if i < len(self._rise_pairs)}
+        if show_f:
+            base = len(active_pairs)
+            active_pairs.extend(self._fall_pairs)
+            active_excluded |= {base + i for i in self._fall_excluded_idx if i < len(self._fall_pairs)}
+        self._update_connectors(active_pairs, active_excluded)

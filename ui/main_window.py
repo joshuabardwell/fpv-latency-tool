@@ -12,10 +12,11 @@ import argparse
 import os
 import statistics
 import sys
+from typing import NamedTuple
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QSortFilterProxyModel, Qt, QTimer
 from PyQt6.QtGui import QImage, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QApplication,
@@ -74,6 +75,40 @@ class _ReleaseFocusOnCommit(QObject):
         return False  # let the widget handle the key normally as well
 
 
+class ResultsPanel(NamedTuple):
+    container: QWidget
+    model: QStandardItemModel
+    table: QTableView
+    proxy: "ExcludedFilterProxy"
+    summary_model: QStandardItemModel
+    clear_all_btn: QPushButton
+    show_excluded_btn: QPushButton
+
+
+class ExcludedFilterProxy(QSortFilterProxyModel):
+    """Filters a results table to only its checked ("Exclude") rows, when
+    Show Excluded is on. The exclude column's check state is the only
+    exclusion bookkeeping this proxy does — MainWindow owns the actual
+    exclude sets; this just decides what's visible."""
+
+    def __init__(self, exclude_col: int, parent=None):
+        super().__init__(parent)
+        self._exclude_col = exclude_col
+        self._show_only = False
+
+    def set_show_only(self, show_only: bool) -> None:
+        if show_only != self._show_only:
+            self._show_only = show_only
+            self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent) -> bool:
+        if not self._show_only:
+            return True
+        source = self.sourceModel()
+        item = source.item(source_row, self._exclude_col)
+        return item is not None and item.checkState() == Qt.CheckState.Checked
+
+
 def bgr_to_qpixmap(frame: np.ndarray) -> QPixmap:
     """Convert an OpenCV BGR frame to a QPixmap at full resolution."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -126,6 +161,15 @@ class MainWindow(QMainWindow):
         # the next Analyze, so it doesn't shift out from under a loaded result
         # set just because the user is browsing the Direction pulldown.
         self._results_polarity: str | None = None
+
+        # Manual outlier exclusion, per direction. Indices are positions into
+        # the current rise_pairs/fall_pairs list and are only meaningful
+        # until the next redetect — _on_pairs_rebuilt clears both sets (and
+        # both show-only flags) whenever pairs_updated fires.
+        self._rise_excluded: set[int] = set()
+        self._fall_excluded: set[int] = set()
+        self._rise_show_excluded_only: bool = False
+        self._fall_show_excluded_only: bool = False
 
         self._build_ui()
         self._wire_events()
@@ -421,14 +465,28 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
-        result_columns = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        result_columns = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        self._exclude_col = result_columns.index("Exclude")
+        self._orig_frame_col = result_columns.index("Original Frame")
 
-        self.rise_results_container, self._rise_results_model, self.rise_results_table, \
-            self._rise_summary_model = self._build_results_table(
-                "Dark To Light Transitions", result_columns)
-        self.fall_results_container, self._fall_results_model, self.fall_results_table, \
-            self._fall_summary_model = self._build_results_table(
-                "Light To Dark Transitions", result_columns)
+        rise_panel = self._build_results_table("Dark To Light Transitions", result_columns)
+        self.rise_results_container = rise_panel.container
+        self._rise_results_model = rise_panel.model
+        self.rise_results_table = rise_panel.table
+        self._rise_results_proxy = rise_panel.proxy
+        self._rise_summary_model = rise_panel.summary_model
+        self.rise_clear_excluded_btn = rise_panel.clear_all_btn
+        self.rise_show_excluded_btn = rise_panel.show_excluded_btn
+
+        fall_panel = self._build_results_table("Light To Dark Transitions", result_columns)
+        self.fall_results_container = fall_panel.container
+        self._fall_results_model = fall_panel.model
+        self.fall_results_table = fall_panel.table
+        self._fall_results_proxy = fall_panel.proxy
+        self._fall_summary_model = fall_panel.summary_model
+        self.fall_clear_excluded_btn = fall_panel.clear_all_btn
+        self.fall_show_excluded_btn = fall_panel.show_excluded_btn
+
         right_layout.addWidget(self.rise_results_container, 1)
         right_layout.addWidget(self.fall_results_container, 1)
 
@@ -441,9 +499,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([800, 600])
         self.setCentralWidget(splitter)
 
-    def _build_results_table(
-        self, title: str, columns: list[str]
-    ) -> tuple[QWidget, QStandardItemModel, QTableView, QStandardItemModel]:
+    def _build_results_table(self, title: str, columns: list[str]) -> ResultsPanel:
         container = QWidget()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -471,9 +527,11 @@ class MainWindow(QMainWindow):
 
         model = QStandardItemModel(0, len(columns))
         model.setHorizontalHeaderLabels(columns)
+        proxy = ExcludedFilterProxy(self._exclude_col)
+        proxy.setSourceModel(model)
         table = QTableView()
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        table.setModel(model)
+        table.setModel(proxy)
         table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
@@ -481,7 +539,20 @@ class MainWindow(QMainWindow):
         table.verticalHeader().setVisible(False)
         container_layout.addWidget(table)
 
-        return container, model, table, summary_model
+        button_row = QHBoxLayout()
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        clear_all_btn.setEnabled(False)
+        show_excluded_btn = QPushButton("Show Excluded")
+        show_excluded_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        show_excluded_btn.setCheckable(True)
+        show_excluded_btn.setEnabled(False)
+        button_row.addWidget(clear_all_btn)
+        button_row.addWidget(show_excluded_btn)
+        button_row.addStretch(1)
+        container_layout.addLayout(button_row)
+
+        return ResultsPanel(container, model, table, proxy, summary_model, clear_all_btn, show_excluded_btn)
 
     def _wire_events(self) -> None:
         self.open_button.clicked.connect(self.on_open_file)
@@ -531,12 +602,22 @@ class MainWindow(QMainWindow):
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
         self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
-        self.brightness_graph.pairs_updated.connect(self._update_results_table)
+        self.brightness_graph.pairs_updated.connect(self._on_pairs_rebuilt)
         self.known_period_spin.valueChanged.connect(self._update_fps_verify_row)
         self.show_cli_btn.clicked.connect(self._on_show_cli)
         self.export_csv_btn.clicked.connect(self._on_export_csv)
         self.rise_results_table.clicked.connect(self._on_results_row_clicked)
         self.fall_results_table.clicked.connect(self._on_results_row_clicked)
+        self._rise_results_model.itemChanged.connect(
+            lambda item: self._on_exclude_toggled("rising", item))
+        self._fall_results_model.itemChanged.connect(
+            lambda item: self._on_exclude_toggled("falling", item))
+        self.rise_clear_excluded_btn.clicked.connect(lambda: self._on_clear_excluded("rising"))
+        self.fall_clear_excluded_btn.clicked.connect(lambda: self._on_clear_excluded("falling"))
+        self.rise_show_excluded_btn.toggled.connect(
+            lambda checked: self._on_toggle_show_excluded("rising", checked))
+        self.fall_show_excluded_btn.toggled.connect(
+            lambda checked: self._on_toggle_show_excluded("falling", checked))
         self.frame_view.roi_changed.connect(self._on_roi_changed)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
@@ -1002,12 +1083,82 @@ class MainWindow(QMainWindow):
             )
 
     def _on_results_row_clicked(self, index) -> None:
-        item = index.model().item(index.row(), 0)  # column 0 = Original Frame
-        if item is not None and self.reader is not None:
-            self.show_frame(int(item.text()))
+        value = index.sibling(index.row(), self._orig_frame_col).data()
+        if value is not None and self.reader is not None:
+            self.show_frame(int(value))
 
     def _update_export_csv_enabled(self) -> None:
         self.export_csv_btn.setEnabled(bool(self.brightness_graph.get_pairs()))
+
+    def _current_direction_pairs(self) -> tuple[list, list, float]:
+        """(rise_pairs, fall_pairs, fps) for the polarity pinned at the last
+        Analyze click — the same gating _update_results_table uses."""
+        mode = self._results_polarity
+        fps = self.reader.fps_effective if self.reader else 30.0
+        rise_pairs = self.brightness_graph.get_pairs_for("rising", active=mode) if mode else []
+        fall_pairs = self.brightness_graph.get_pairs_for("falling", active=mode) if mode else []
+        return rise_pairs, fall_pairs, fps
+
+    def _on_pairs_rebuilt(self) -> None:
+        """pairs_updated fired because pairs were genuinely recomputed
+        (redetect or a fresh Analyze run) — any manual exclusions no longer
+        correspond to anything meaningful, since pairs have no identity
+        across a redetect."""
+        self._rise_excluded.clear()
+        self._fall_excluded.clear()
+        self._rise_show_excluded_only = False
+        self._fall_show_excluded_only = False
+        self._update_results_table()
+
+    def _sync_exclude_controls(self, direction: str) -> None:
+        if direction == "rising":
+            excluded, show_only = self._rise_excluded, self._rise_show_excluded_only
+            clear_btn, show_btn = self.rise_clear_excluded_btn, self.rise_show_excluded_btn
+        else:
+            excluded, show_only = self._fall_excluded, self._fall_show_excluded_only
+            clear_btn, show_btn = self.fall_clear_excluded_btn, self.fall_show_excluded_btn
+        has_excluded = bool(excluded)
+        clear_btn.setEnabled(has_excluded)
+        show_btn.setEnabled(has_excluded)
+        show_btn.blockSignals(True)
+        show_btn.setChecked(show_only)
+        show_btn.blockSignals(False)
+
+    def _on_exclude_toggled(self, direction: str, item: QStandardItem) -> None:
+        if item.column() != self._exclude_col:
+            return
+        excluded = self._rise_excluded if direction == "rising" else self._fall_excluded
+        idx = item.row()  # source-model row == pair index; the proxy only filters, never reorders
+        if item.checkState() == Qt.CheckState.Checked:
+            excluded.add(idx)
+        else:
+            excluded.discard(idx)
+
+        rise_pairs, fall_pairs, fps = self._current_direction_pairs()
+        self.brightness_graph.set_excluded_pairs(self._rise_excluded, self._fall_excluded)
+        if direction == "rising":
+            included = [p for i, p in enumerate(rise_pairs) if i not in self._rise_excluded]
+            self._populate_summary_model(self._rise_summary_model, included, fps)
+        else:
+            included = [p for i, p in enumerate(fall_pairs) if i not in self._fall_excluded]
+            self._populate_summary_model(self._fall_summary_model, included, fps)
+        self._sync_exclude_controls(direction)
+
+    def _on_clear_excluded(self, direction: str) -> None:
+        if direction == "rising":
+            self._rise_excluded.clear()
+            self._rise_show_excluded_only = False
+        else:
+            self._fall_excluded.clear()
+            self._fall_show_excluded_only = False
+        self._update_results_table()
+
+    def _on_toggle_show_excluded(self, direction: str, checked: bool) -> None:
+        if direction == "rising":
+            self._rise_show_excluded_only = checked
+        else:
+            self._fall_show_excluded_only = checked
+        self._update_results_table()
 
     def _update_results_table(self) -> None:
         """Repopulates both rise/fall panels (table + summary) for whatever
@@ -1016,19 +1167,35 @@ class MainWindow(QMainWindow):
         change (analysis completes, or results are invalidated), never as a
         reaction to the pulldown alone. Both panels are always visible; a
         direction with no matching pairs just shows blank/placeholder rows."""
-        mode = self._results_polarity
-        fps = self.reader.fps_effective if self.reader else 30.0
-        rise_pairs = self.brightness_graph.get_pairs_for("rising", active=mode) if mode else []
-        fall_pairs = self.brightness_graph.get_pairs_for("falling", active=mode) if mode else []
-        self._populate_results_model(self._rise_results_model, rise_pairs, fps)
-        self._populate_results_model(self._fall_results_model, fall_pairs, fps)
-        self._populate_summary_model(self._rise_summary_model, rise_pairs, fps)
-        self._populate_summary_model(self._fall_summary_model, fall_pairs, fps)
+        rise_pairs, fall_pairs, fps = self._current_direction_pairs()
 
-    def _populate_results_model(self, model: QStandardItemModel, pairs: list, fps: float) -> None:
+        self.brightness_graph.set_excluded_pairs(self._rise_excluded, self._fall_excluded)
+        self._rise_results_proxy.set_show_only(self._rise_show_excluded_only)
+        self._fall_results_proxy.set_show_only(self._fall_show_excluded_only)
+
+        rise_included = [p for i, p in enumerate(rise_pairs) if i not in self._rise_excluded]
+        fall_included = [p for i, p in enumerate(fall_pairs) if i not in self._fall_excluded]
+
+        self._populate_results_model(self._rise_results_model, rise_pairs, fps, self._rise_excluded)
+        self._populate_results_model(self._fall_results_model, fall_pairs, fps, self._fall_excluded)
+        self._populate_summary_model(self._rise_summary_model, rise_included, fps)
+        self._populate_summary_model(self._fall_summary_model, fall_included, fps)
+
+        self._sync_exclude_controls("rising")
+        self._sync_exclude_controls("falling")
+
+    def _populate_results_model(
+        self, model: QStandardItemModel, pairs: list, fps: float, excluded: set[int]
+    ) -> None:
         model.setRowCount(0)
-        for p in pairs:
+        for idx, p in enumerate(pairs):
+            exclude_item = QStandardItem()
+            exclude_item.setCheckable(True)
+            exclude_item.setCheckState(
+                Qt.CheckState.Checked if idx in excluded else Qt.CheckState.Unchecked)
+            exclude_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             model.appendRow([
+                exclude_item,
                 QStandardItem(str(p.orig_frame)),
                 QStandardItem(str(p.disp_frame)),
                 QStandardItem(str(p.delta_frames())),
@@ -1050,10 +1217,16 @@ class MainWindow(QMainWindow):
             model.setItem(0, col, QStandardItem(text))
 
     def _on_export_csv(self) -> None:
-        pairs = self.brightness_graph.get_pairs()
-        if not pairs:
+        rise_pairs, fall_pairs, fps = self._current_direction_pairs()
+        combined = sorted(
+            [(p, i in self._rise_excluded) for i, p in enumerate(rise_pairs)]
+            + [(p, i in self._fall_excluded) for i, p in enumerate(fall_pairs)],
+            key=lambda t: t[0].orig_frame,
+        )
+        if not combined:
             return
-        fps = self.reader.fps_effective if self.reader else 30.0
+        pairs = [p for p, _ in combined]
+        flags = [f for _, f in combined]
         path, _ = QFileDialog.getSaveFileName(
             self, "Export CSV", "", "CSV Files (*.csv)"
         )
@@ -1061,7 +1234,7 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith(".csv"):
             path += ".csv"
-        write_pairs_csv(path, pairs, fps)
+        write_pairs_csv(path, pairs, fps, excluded_flags=flags)
 
     def _update_pairs_label(self) -> None:
         pairs = self.brightness_graph.get_pairs()

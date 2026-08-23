@@ -8,6 +8,7 @@ QThread.finished cleanup slot to clear MainWindow._extractor.
 import argparse
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from PyQt6.QtCore import Qt
 
@@ -37,6 +38,27 @@ def loaded(window, synth_video):
 def analyze(win, qtbot):
     win._on_analyze_clicked()
     qtbot.waitUntil(lambda: win._extractor is None, timeout=10000)
+
+
+def _multi_pair_arrays(latency=2):
+    """3 rising + 3 falling transitions per signal, disp shifted `latency`
+    frames later than orig -- more pairs than synth_video's 1+1, for tests
+    that need partial exclusion to be meaningful."""
+    block = [20.0] * 6
+    pattern = (block + [220.0] * 6) * 3 + block
+    orig = np.array(pattern, dtype=np.float64)
+    disp = np.concatenate([np.full(latency, 20.0), orig[:-latency]])
+    return orig, disp
+
+
+def load_multi_pairs(win):
+    """Loads 3 rising + 3 falling matched pairs directly into the graph,
+    bypassing extraction, and pins the results panel to show them."""
+    orig, disp = _multi_pair_arrays()
+    win.brightness_graph.set_data(orig, disp, in_point=0)
+    win._results_polarity = "both"
+    win._update_results_table()
+    return win
 
 
 class TestAnalysisLifecycle:
@@ -89,8 +111,8 @@ class TestAnalysisLifecycle:
         fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
         assert loaded._rise_results_model.rowCount() == len(rise_pairs) == 1
         assert loaded._fall_results_model.rowCount() == len(fall_pairs) == 1
-        assert int(loaded._rise_results_model.item(0, 0).text()) == rise_pairs[0].orig_frame
-        assert int(loaded._fall_results_model.item(0, 0).text()) == fall_pairs[0].orig_frame
+        assert int(loaded._rise_results_model.item(0, loaded._orig_frame_col).text()) == rise_pairs[0].orig_frame
+        assert int(loaded._fall_results_model.item(0, loaded._orig_frame_col).text()) == fall_pairs[0].orig_frame
 
     def test_results_panels_always_visible(self, loaded, qtbot):
         """Regression: both direction panels stay visible at all times —
@@ -149,7 +171,7 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        expected = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
                 model.headerData(c, Qt.Orientation.Horizontal)
@@ -517,3 +539,170 @@ class TestUnmatchedNavButtons:
         loaded.show_frame(10)
         qtbot.mouseClick(loaded.next_unmatched_button, Qt.MouseButton.LeftButton)
         assert loaded.timeline.current_frame == 10
+
+
+def _varied_latency_arrays():
+    """3 rising + 3 falling transitions per signal, disp offset by 2/4/6
+    frames respectively -- unlike load_multi_pairs's uniform latency, this
+    lets a test prove excluding a specific pair actually changes the
+    summary's numeric value, not just its row count."""
+    orig = np.array(
+        [20.0] * 5 + [220.0] * 5 + [20.0] * 5 + [220.0] * 5 + [20.0] * 5 + [220.0] * 5 + [20.0] * 10,
+        dtype=np.float64,
+    )  # rising @ 5,15,25 -- falling @ 10,20,30
+    disp = np.array(
+        [20.0] * 7 + [220.0] * 5 + [20.0] * 7 + [220.0] * 5 + [20.0] * 7 + [220.0] * 5 + [20.0] * 4,
+        dtype=np.float64,
+    )  # rising @ 7,19,31 -- falling @ 12,24,36  (latencies: 2, 4, 6)
+    assert len(orig) == len(disp)
+    return orig, disp
+
+
+class TestExcludePairs:
+    def test_exclude_column_present_and_checkable(self, loaded):
+        load_multi_pairs(loaded)
+        item = loaded._rise_results_model.item(0, loaded._exclude_col)
+        assert item.isCheckable()
+        assert item.checkState() == Qt.CheckState.Unchecked
+
+    def test_checking_exclude_removes_pair_from_summary(self, loaded):
+        orig, disp = _varied_latency_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+        fps = loaded.reader.fps_effective
+        rise_pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        assert [p.delta_frames() for p in rise_pairs] == [2, 4, 6]
+
+        # Exclude the 6-frame outlier (row 2).
+        loaded._rise_results_model.item(2, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+
+        remaining_ms = [p.delta_ms(fps) for p in rise_pairs[:2]]
+        assert loaded._rise_summary_model.item(0, 0).text() == \
+            f"{sum(remaining_ms) / len(remaining_ms):.1f} ms"
+        assert loaded._rise_summary_model.item(0, 2).text() == f"{max(remaining_ms):.1f} ms"
+
+    def test_excluded_row_stays_visible_and_checked_in_normal_view(self, loaded):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        assert loaded._rise_results_model.rowCount() == 3
+        assert loaded.rise_results_table.model().rowCount() == 3
+        assert loaded._rise_results_model.item(0, loaded._exclude_col).checkState() == Qt.CheckState.Checked
+
+    def test_show_excluded_filters_to_only_excluded_rows(self, loaded, qtbot):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(1, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
+        proxy = loaded.rise_results_table.model()
+        assert proxy.rowCount() == 1
+        assert int(proxy.index(0, loaded._orig_frame_col).data()) == loaded.brightness_graph._rise_pairs[1].orig_frame
+
+    def test_show_excluded_does_not_change_summary_stats(self, loaded, qtbot):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        before = [loaded._rise_summary_model.item(0, c).text() for c in range(4)]
+        qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
+        after = [loaded._rise_summary_model.item(0, c).text() for c in range(4)]
+        assert before == after
+
+    def test_clear_all_clears_exclusions_and_turns_off_show_excluded(self, loaded, qtbot):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
+        assert loaded.rise_show_excluded_btn.isChecked()
+
+        qtbot.mouseClick(loaded.rise_clear_excluded_btn, Qt.MouseButton.LeftButton)
+        assert not loaded.rise_show_excluded_btn.isChecked()
+        assert loaded.rise_results_table.model().rowCount() == 3
+        assert loaded._rise_results_model.item(0, loaded._exclude_col).checkState() == Qt.CheckState.Unchecked
+
+    def test_exclusion_independent_per_direction(self, loaded):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        assert loaded._fall_results_model.item(0, loaded._exclude_col).checkState() == Qt.CheckState.Unchecked
+        assert loaded.rise_clear_excluded_btn.isEnabled()
+        assert not loaded.fall_clear_excluded_btn.isEnabled()
+
+    @pytest.mark.parametrize("trigger", ["delta", "spacing", "max_latency"])
+    def test_redetect_clears_all_exclusions(self, loaded, trigger):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        loaded._fall_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        assert loaded._rise_excluded and loaded._fall_excluded
+
+        graph = loaded.brightness_graph
+        if trigger == "delta":
+            graph.set_delta(graph._delta)
+        elif trigger == "spacing":
+            graph.set_min_spacing(graph._min_spacing)
+        else:
+            graph.set_max_latency(graph._max_latency)
+
+        assert loaded._rise_excluded == set()
+        assert loaded._fall_excluded == set()
+
+    def test_new_analyze_clears_all_exclusions(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        assert loaded._rise_excluded
+        analyze(loaded, qtbot)
+        assert loaded._rise_excluded == set()
+
+    def test_row_click_jumps_to_correct_frame_through_proxy(self, loaded, qtbot):
+        """Regression: the results table's model is now a QSortFilterProxyModel,
+        which has no .item() -- the row-click handler must resolve the frame
+        via index.sibling() so it works both filtered and unfiltered."""
+        load_multi_pairs(loaded)
+        proxy = loaded.rise_results_table.model()
+        index = proxy.index(1, loaded._exclude_col)
+        loaded._on_results_row_clicked(index)
+        assert loaded.timeline.current_frame == loaded.brightness_graph._rise_pairs[1].orig_frame
+
+        loaded._rise_results_model.item(2, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        qtbot.mouseClick(loaded.rise_show_excluded_btn, Qt.MouseButton.LeftButton)
+        assert proxy.rowCount() == 1
+        loaded._on_results_row_clicked(proxy.index(0, loaded._exclude_col))
+        assert loaded.timeline.current_frame == loaded.brightness_graph._rise_pairs[2].orig_frame
+
+    def test_buttons_disabled_when_nothing_excluded(self, loaded):
+        load_multi_pairs(loaded)
+        assert not loaded.rise_clear_excluded_btn.isEnabled()
+        assert not loaded.rise_show_excluded_btn.isEnabled()
+
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+        assert loaded.rise_clear_excluded_btn.isEnabled()
+        assert loaded.rise_show_excluded_btn.isEnabled()
+
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(Qt.CheckState.Unchecked)
+        assert not loaded.rise_clear_excluded_btn.isEnabled()
+        assert not loaded.rise_show_excluded_btn.isEnabled()
+
+    def test_export_csv_includes_excluded_column_with_current_state(self, loaded, tmp_path, monkeypatch):
+        load_multi_pairs(loaded)
+        loaded._rise_results_model.item(1, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
+
+        out_path = tmp_path / "export.csv"
+        monkeypatch.setattr(
+            "ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(out_path), ""))
+        loaded._on_export_csv()
+
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert lines[0].endswith(",Excluded")
+        excluded_frame = str(loaded.brightness_graph._rise_pairs[1].orig_frame)
+        matches = [ln for ln in lines[1:] if ln.split(",")[1] == excluded_frame]
+        assert len(matches) == 1
+        assert matches[0].endswith(",Y")
+        assert sum(1 for ln in lines[1:] if ln.endswith(",N")) == 5
+
+    def test_export_csv_follows_results_polarity_not_live_pulldown(self, loaded, tmp_path, monkeypatch):
+        load_multi_pairs(loaded)  # pins _results_polarity to "both"
+        idx = loaded.polarity_combo.findData("rising")
+        loaded.polarity_combo.setCurrentIndex(idx)  # live pulldown now says "rising"
+
+        out_path = tmp_path / "export2.csv"
+        monkeypatch.setattr(
+            "ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(out_path), ""))
+        loaded._on_export_csv()
+
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) - 1 == 6  # 3 rise + 3 fall, not filtered down by the live pulldown

@@ -466,3 +466,45 @@ class TestBrightnessGraphClickDragPan:
         g.visible_range_changed.connect(lambda s, e: seen.append((s, e)))
         g._apply_pan_drag(-30)
         assert len(seen) == 1
+
+
+class TestExcludedPairStyling:
+    def test_set_excluded_pairs_mutes_marker_color(self, qtbot):
+        from ui.brightness_graph import _MUTED_MARKER
+
+        g = load_graph_with_pairs(qtbot)
+        g.set_excluded_pairs({0}, set())  # exclude the single rising pair (orig=5, disp=7)
+
+        assert g._sc_rise_orig.data["brush"][0].color().getRgb()[:3] == _MUTED_MARKER
+        assert g._sc_rise_disp.data["brush"][0].color().getRgb()[:3] == _MUTED_MARKER
+        # Falling pair wasn't excluded -- its markers keep the construction
+        # default (no per-point brush override).
+        assert g._sc_fall_orig.data["brush"][0] is None
+        assert g._sc_fall_disp.data["brush"][0] is None
+
+    def test_set_excluded_pairs_excluded_connector_uses_muted_pen(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_excluded_pairs({0}, set())
+
+        exc_x, _ = g._connector_excluded.getData()
+        normal_x, _ = g._pair_connectors.getData()
+        assert 5.0 in exc_x and 7.0 in exc_x
+        assert 5.0 not in normal_x and 7.0 not in normal_x
+        assert 10.0 in normal_x and 12.0 in normal_x  # falling pair stays on the normal connector
+
+    def test_set_excluded_pairs_does_not_emit_pairs_updated(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        calls = []
+        g.pairs_updated.connect(lambda: calls.append(1))
+        g.set_excluded_pairs({0}, set())
+        assert calls == []
+
+    def test_redetect_resets_marker_styling(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_excluded_pairs({0}, set())
+        assert g._sc_rise_orig.data["brush"][0] is not None
+
+        g.set_delta(g._delta)  # forces a redetect even with an unchanged value
+        assert g._sc_rise_orig.data["brush"][0] is None
+        exc_x, _ = g._connector_excluded.getData()
+        assert not exc_x  # None or empty, depending on pyqtgraph's internal state
