@@ -12,8 +12,10 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - Esc now cancels a running analysis, same as clicking the Cancel button.
 - "<< Unmatched" / "Unmatched >>" buttons jump the playhead between unmatched transitions (shown red on the graph) without stepping through every matched pair in between.
 - Matched transition pairs highlight (a white ring around each marker plus a brightened connector segment) when the playhead lands on one of the pair's frames, or when the mouse hovers a matched marker directly; unmatched markers never highlight.
+- Results tables gained a per-row "Exclude" checkbox to manually drop an outlier/mismatched pair from the Mean/Min/Max/Median summary without deleting it from the table, plus per-direction "Clear All" and "Show Excluded" (filters the table to only excluded rows, without changing the summary) controls. Excluded pairs render with a muted marker/connector color on the brightness graph. Any threshold change or new Analyze run clears all exclusions, since pairs have no stable identity across a redetect. CSV export now always includes an `Excluded` Y/N column.
 
 ### Fixed
+- CSV export now follows the same pinned polarity as the results tables (`self._results_polarity`, set at the last Analyze click) instead of the live Direction pulldown, so it can no longer silently diverge from what's on screen.
 - Results table now refreshes live when Min ΔBrightness, Min Spacing, or Max Latency is adjusted after analysis, instead of staying stuck on the previous (possibly empty) matched-pairs state.
 - CLI startup with a nonexistent video filename now refuses to launch instead of opening an empty GUI with only a status-bar error.
 - Luminance graph's rise/fall transition markers now use the correct pyqtgraph triangle symbols (rise up, fall down), fixing the fall marker rendering as a sideways triangle.

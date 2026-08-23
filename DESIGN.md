@@ -65,7 +65,21 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
 6. **Results** — pairs feed the rise/fall results tables, the mean/min/max
    summary, CSV export, and the FPS verification row (measured
    original-pattern period vs. user-entered known period → computed true
-   fps).
+   fps). Each results row has a manual Exclude checkbox that drops that pair
+   from the Mean/Min/Max/Median summary and from the CSV's `Excluded` column
+   flag, without hiding the row from the normal table view. Exclude state,
+   the per-direction "Show Excluded" filter, and "Clear All" are all
+   independent between the rise and fall panels. Exclusion has no identity
+   across a redetect — pairs are keyed only by their position in the current
+   list, not a stable id — so any threshold change or new Analyze run clears
+   all exclusions for both directions. `MainWindow` owns the exclude sets;
+   `BrightnessGraphWidget.set_excluded_pairs()` is a pure rendering hint
+   (mutes the matched marker/connector color for excluded pairs) and must
+   never emit `pairs_updated`, or it would immediately clear the sets it was
+   just given. The results tables sit behind a `QSortFilterProxyModel`
+   (first use of a proxy model in this codebase) so the "Show Excluded"
+   filter doesn't require rebuilding the underlying `QStandardItemModel` —
+   avoids reentering the model's own `itemChanged` signal from its handler.
 
 ## Threading model
 
