@@ -115,10 +115,19 @@ class TransitionEdge:
 
 @dataclass(frozen=True)
 class SignalQuality:
-    """Whole-signal verdict for one ROI. These are what actually catch ROI
-    composition changing mid-clip: on a proper square-wave test pattern every
-    cycle shares a baseline and an amplitude, and when the display drifts into
-    or out of the ROI, they stop doing so. No knowledge of *why* is needed."""
+    """Whole-signal description for one ROI: on a proper square-wave test
+    pattern every cycle shares a baseline and an amplitude, and these say
+    whether they actually do.
+
+    These booleans describe signal SHAPE, not correctness, and must not be
+    surfaced as errors. A baseline that moves across a clip is entirely normal
+    when the device under test has auto-exposure — the display ROI is showing
+    that camera's image, so its AE opens up through every dark stretch — and
+    the per-transition measurements can still be exactly right, as they were on
+    the reference footage. Framing, changing light, a nudged camera and AE all
+    produce the identical signature here, so nothing downstream may assert a
+    cause. Whether any individual measurement is trustworthy is the
+    per-transition warnings' question, not this record's."""
 
     median_amplitude: float
     baseline_spread: float   # largest departure of any one transition's

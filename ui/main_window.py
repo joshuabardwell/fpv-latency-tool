@@ -54,7 +54,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.edges import DEFAULT_SIGMA_K
+from core.edges import DEFAULT_SIGMA_K, W_LOW_SNR
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
 from core.latency import default_max_latency_frames
@@ -695,7 +695,6 @@ class MainWindow(QMainWindow):
         self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
         self.max_latency_auto_btn.clicked.connect(self._on_max_latency_auto_clicked)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
-        self.brightness_graph.pairs_updated.connect(self._update_quality_label)
         self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
         self.brightness_graph.pairs_updated.connect(self._on_pairs_rebuilt)
@@ -1305,6 +1304,10 @@ class MainWindow(QMainWindow):
 
         self._sync_exclude_controls("rising")
         self._sync_exclude_controls("falling")
+        # Driven from here rather than straight off pairs_updated: the banner
+        # counts flagged pairs over the PINNED polarity, and that is not set
+        # until Analyze, so firing on the signal alone left it stale.
+        self._update_quality_label()
 
         self._apply_playhead_highlight()
 
@@ -1428,42 +1431,71 @@ class MainWindow(QMainWindow):
         write_pairs_csv(path, pairs, fps, excluded_flags=flags)
 
     def _update_quality_label(self) -> None:
-        """Surface the whole-signal verdict and the flagged-pair count. Names
-        which ROI is at fault and suggests the likely cause — a bare warning
-        count would leave the user guessing which of the two to re-draw."""
+        """Report signal shape and measurement trust in two distinct registers,
+        and never assert a cause.
+
+        The per-ROI checks answer "what shape is this signal?", not "is anything
+        wrong". A baseline that moves across the clip is normal when the device
+        under test has auto-exposure — the Display ROI shows that camera's
+        image, so its AE opens up through every dark stretch. Framing, changing
+        light and a nudged camera produce the identical signature, so the tool
+        cannot tell them apart and must not pretend to. It reports what it
+        measured and leaves the cause to the person who set the shot up.
+
+        Whether that reads as information or as a warning is decided by the
+        per-transition flags, which DO answer "is this number trustworthy". On
+        the reference clip every pair measured correctly while the per-ROI check
+        fired, and warning there taught nothing except to ignore the banner.
+        """
         # Pinned polarity, matching the results tables and the CSV — counting
         # over the live pulldown instead would let the banner report pairs the
         # tables aren't showing.
         rise_pairs, fall_pairs, _ = self._current_direction_pairs()
         pairs = rise_pairs + fall_pairs
         orig_quality, disp_quality = self.brightness_graph.get_signal_quality()
-        flagged = sum(1 for p in pairs if not p.is_clean())
+        flagged = [p for p in pairs if not p.is_clean()]
 
-        problems: list[str] = []
+        observations: list[str] = []
         for name, quality in (("Original", orig_quality), ("Display", disp_quality)):
             if quality.unstable_baseline:
-                problems.append(f"unstable baseline on the {name} ROI")
+                observations.append(f"{name} baseline varies across the clip")
             if quality.inconsistent_amplitude:
-                problems.append(f"inconsistent contrast on the {name} ROI")
+                observations.append(f"{name} contrast varies between transitions")
 
-        if not problems and not flagged:
+        if not observations and not flagged:
             self.quality_label.setVisible(False)
             self.quality_label.setText("")
             return
 
-        bits = []
-        if problems:
-            # Upper-case the first letter only; str.capitalize() would lowercase
-            # the rest and turn "Original ROI" into "original roi".
-            sentence = "; ".join(problems)
-            bits.append("⚠ " + sentence[:1].upper() + sentence[1:] + ".")
+        bits: list[str] = []
         if flagged:
-            bits.append(f"{flagged} of {len(pairs)} pairs flagged.")
-        if problems:
+            checks = sorted({w for p in flagged for w in p.quality_warnings()})
             bits.append(
-                "Check that each ROI stays inside its screen for the whole clip."
+                f"⚠ {len(flagged)} of {len(pairs)} pairs flagged: "
+                + ", ".join(checks) + "."
             )
+        if observations:
+            # The explanation belongs to the observation, not to the register —
+            # an em-dash ties it to "contrast varies" rather than letting it
+            # read as dismissing the ⚠ above, which is about something else.
+            # Offered as the common explanation, never as a diagnosis.
+            sentence = "; ".join(observations)
+            bits.append(
+                sentence[:1].upper() + sentence[1:]
+                + " — normal when the device under test has auto-exposure, "
+                "and compensated for."
+            )
+        # The only flag where ROI framing genuinely is implicated: too little of
+        # the screen inside the box leaves the step buried in the noise.
+        if any(W_LOW_SNR in p.quality_warnings() for p in flagged):
+            bits.append(
+                "Low SNR can mean an ROI holds too little of its screen."
+            )
+
         self.quality_label.setText(" ".join(bits))
+        self.quality_label.setStyleSheet(
+            "color: %s; font-size: 11px;" % ("#e65ae6" if flagged else "#9a9a9a")
+        )
         self.quality_label.setVisible(True)
 
     def _on_exclude_flagged(self, direction: str) -> None:

@@ -304,9 +304,42 @@ against each other — baselines **within a polarity only**, since on a square
 wave a rising transition's baseline is the dark level and a falling one's is
 the bright level.
 
+### The device under test moves its own baseline
+
+The Display ROI shows the *device under test's* image. If that device has
+auto-exposure — most FPV cameras do — its AE opens up through every dark
+stretch of the test pattern and closes when the light fires. Measured on real
+footage across one LED-off period, the display's level went
+34 → 43 → 90 → 126 → 91 → 104 before the next flash: AE opening, then hunting.
+
+That is the device working normally, not a defective recording, and the
+measurements came out **correct anyway** — the drift-aware band exists exactly
+for this. It is why `unstable_baseline` and `inconsistent_amplitude` describe
+signal *shape* and are never presented as errors. Framing, changing light, a
+nudged camera and AE on the device under test all produce an identical
+signature, so **nothing may assert a cause**; the tool reports what it measured
+and the person who set the shot up supplies the why.
+
+Two retractions worth recording, because both are easy to arrive at again:
+
+- **Do not judge "is this ROI framed correctly" with an absolute brightness
+  threshold.** Counting pixels above `dark + 40` said the reference clip's
+  Display ROI was 29% permanently bright and 25% permanently dark, implying
+  bad framing. It was an artifact — exposure and screen brightness vary, so an
+  absolute cutoff measures the wrong thing. Redone per-pixel, comparing each
+  pixel only against itself at two times, **89% of that ROI participates fully**
+  and the framing is fine.
+- **The recording camera's exposure was locked, and background patches away
+  from both screens swing *with* the light** (2.3 → 39/87/175), which is the
+  light illuminating the room — the opposite sign from AE compensation. Do not
+  re-diagnose the recording camera.
+
+### Which UI each level drives
+
 The two levels drive **different UI**, and the distinction matters: the ⚠
 column and Exclude Flagged key on per-transition flags; the banner keys on the
-per-signal verdict. A steadily drifting baseline flags the *signal* but flags
+per-signal verdict, and renders it as information rather than a warning unless
+some measurement is flagged too. A steadily drifting baseline flags the *signal* but flags
 no individual pair, because under pure drift every transition is still locally
 well-measured and its latency is genuinely fine. Drift mild relative to the
 step is absorbed by the adaptive band and raises no per-transition warning at
@@ -355,6 +388,13 @@ These are properties of stage 1 and are unchanged:
   detected as a genuine transition. Characterization now flags it, but does not
   suppress it; rejecting non-transition steps would mean changing the locate
   stage, which would move existing measurements.
+- **Lowering Min ΔBrightness far enough can make auto-exposure look like a
+  transition.** On the reference footage the device under test's AE moved the
+  display 25–39 levels over ten frames. That is only ~3 levels per frame, so a
+  per-frame derivative at the Min Δ of 20 in use never saw it — but someone
+  dropping Min Δ to chase a dim transition could start detecting AE hunting as
+  transitions. The tell is transitions appearing at implausibly regular
+  intervals through a stretch where nothing flashed.
 - Delta is auto-computed on new data (10 % of the combined brightness range,
   min 5) only while the spinbox is untouched — a user-set or CLI threshold
   survives re-analysis.

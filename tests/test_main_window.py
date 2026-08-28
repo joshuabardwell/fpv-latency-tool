@@ -1040,17 +1040,58 @@ class TestQualityBanner:
         assert not loaded.quality_label.isVisible()
         assert loaded.quality_label.text() == ""
 
-    def test_names_the_offending_roi_on_a_drifting_signal(self, loaded):
-        orig, disp = _drifting_arrays()
-        loaded.brightness_graph.set_data(orig, disp, in_point=0)
-        loaded._results_polarity = "both"
-        loaded._update_results_table()
-        text = loaded.quality_label.text()
-        assert "unstable baseline" in text.lower()
-        # Naming which ROI is at fault is the point; a bare count would leave
-        # the user guessing which of the two to re-draw.
-        assert "Original ROI" in text or "Display ROI" in text
+    def _load(self, win, arrays):
+        orig, disp = arrays
+        win.brightness_graph.set_data(orig, disp, in_point=0)
+        win._results_polarity = "both"
+        win._update_results_table()
+        return win.quality_label.text()
+
+    def test_drift_with_clean_measurements_reads_as_information(self, loaded):
+        """Regression, and the shape of the real reference clip: the Display
+        baseline moved across the whole clip while every pair still measured
+        correctly. The banner used to raise a warning and tell the user to
+        re-draw their ROI. Both were wrong — a warning on a correct measurement
+        is one the user learns to skip, and the tool cannot know the cause."""
+        text = self._load(loaded, _drifting_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        assert all(p.is_clean() for p in pairs), "fixture should measure cleanly"
+
         assert loaded.quality_label.isVisible()
+        assert "⚠" not in text
+        assert "baseline varies" in text
+        assert "auto-exposure" in text  # offered as explanation, not diagnosis
+
+    def test_information_register_never_blames_the_roi(self, loaded):
+        """The signature of a moving baseline is identical whether it comes
+        from auto-exposure on the device under test, ROI framing, changing
+        light or a nudged camera. Asserting one of them sends the user to the
+        wrong place — on the reference clip, to re-frame an ROI that measured
+        89% participating."""
+        text = self._load(loaded, _drifting_arrays()).lower()
+        for blame in ("re-draw", "stays inside", "check that each roi"):
+            assert blame not in text
+
+    def test_flagged_measurements_read_as_a_warning(self, loaded):
+        text = self._load(loaded, _per_pair_flagged_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        assert any(not p.is_clean() for p in pairs), "fixture should flag pairs"
+
+        assert "⚠" in text
+        assert "pairs flagged" in text
+        # Names the checks that failed, so there is something to act on.
+        assert any(w in text for w in ("unsteady-level", "low-snr",
+                                       "ambiguous-edge", "slow-ramp"))
+
+    def test_roi_framing_is_only_suggested_for_low_snr(self, loaded):
+        """low-snr is the one flag where framing genuinely is implicated: too
+        little of the screen inside the box leaves the step in the noise."""
+        from core.edges import W_LOW_SNR
+
+        text = self._load(loaded, _per_pair_flagged_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        has_low_snr = any(W_LOW_SNR in p.quality_warnings() for p in pairs)
+        assert ("too little of its screen" in text) == has_low_snr
 
     def test_warning_column_marks_flagged_rows_with_a_tooltip(self, loaded):
         orig, disp = _per_pair_flagged_arrays()
