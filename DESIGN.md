@@ -215,6 +215,28 @@ curve for matching, but it is not any of the three metrics: on an asymmetric
 ramp the steepest step sits early, which is what made the single number this
 tool used to report neither first-pixel nor full-frame.
 
+### The source light is not always an LED
+
+Test setups vary: an LED bulb, some other kind of bulb, or a computer screen
+playing a test pattern. **Never tune detection to one of them.** Each has a
+different transition shape:
+
+- **LED** — near-instant; first-light and fully-lit are one or two frames apart.
+- **Incandescent/other bulb** — ramps slowly and *uniformly* across the whole
+  lit area.
+- **Screen** — lights progressively by scanline, so a small area is fully bright
+  while the rest is still dark.
+
+ROI **mean** brightness is the source-agnostic statistic, and that is why it
+stays. A high percentile or a lit-pixel fraction is tempting — it detects a
+screen's first scanline far more sensitively than a mean does, since a mean
+barely moves when 5% of the area lights. But on a bulb that brightens uniformly
+the same statistic fires the instant any single pixel crosses a threshold, which
+is noise, not signal. It would optimise for one source at the others' expense.
+
+The same applies to ramp length: a multi-frame rise is a property of the source,
+not a defect, and must not be treated as bad data on its own.
+
 ### The three metrics
 
     first-pixel latency = display first_frame - source first_frame
@@ -314,8 +336,10 @@ Two estimator subtleties worth not re-deriving:
   space happened to surround a transition rather than on the transition itself.
 
 All the thresholds are named constants in `core/edges.py`. They have been
-calibrated against one real 240fps clip (4 transitions) plus synthetic cases,
-which is a start, not a validation — they are still
+calibrated against one real 240fps clip (4 transitions, LED source) plus
+synthetic cases, which is a start, not a validation — footage from a bulb or a
+screen source has not been tested at all, and those have very different
+transition shapes (see above). They are still
 first guesses that still need tuning against real footage.
 
 ### Limits of the locate stage
