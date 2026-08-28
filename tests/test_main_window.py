@@ -788,3 +788,93 @@ class TestExcludePairs:
 
         lines = out_path.read_text(encoding="utf-8").splitlines()
         assert len(lines) - 1 == 6  # 3 rise + 3 fall, not filtered down by the live pulldown
+
+
+class TestPlayheadRowHighlight:
+    _HIGHLIGHT_RGBA = (255, 255, 255, 40)
+
+    def test_landing_on_matched_frame_highlights_correct_row(self, loaded):
+        load_multi_pairs(loaded)
+        target = loaded.brightness_graph._rise_pairs[1]
+        loaded.brightness_graph.set_frame(target.orig_frame)
+
+        item = loaded._rise_results_model.item(1, loaded._orig_frame_col)
+        assert item.background().color().getRgb() == self._HIGHLIGHT_RGBA
+        # The Exclude column is deliberately skipped (avoids re-firing itemChanged).
+        excl_item = loaded._rise_results_model.item(1, loaded._exclude_col)
+        assert excl_item.background().style() == Qt.BrushStyle.NoBrush
+
+    def test_moving_away_clears_previous_row_highlight(self, loaded):
+        load_multi_pairs(loaded)
+        r0 = loaded.brightness_graph._rise_pairs[0]
+        r1 = loaded.brightness_graph._rise_pairs[1]
+        loaded.brightness_graph.set_frame(r0.orig_frame)
+        loaded.brightness_graph.set_frame(r1.orig_frame)
+
+        old_item = loaded._rise_results_model.item(0, loaded._orig_frame_col)
+        assert old_item.background().style() == Qt.BrushStyle.NoBrush
+        new_item = loaded._rise_results_model.item(1, loaded._orig_frame_col)
+        assert new_item.background().color().getRgb() == self._HIGHLIGHT_RGBA
+
+    def test_landing_on_unmatched_frame_clears_highlight(self, loaded):
+        load_multi_pairs(loaded)
+        r0 = loaded.brightness_graph._rise_pairs[0]
+        loaded.brightness_graph.set_frame(r0.orig_frame)
+        loaded.brightness_graph.set_frame(0)  # frame 0 is inside the leading dark block -- unmatched
+
+        item = loaded._rise_results_model.item(0, loaded._orig_frame_col)
+        assert item.background().style() == Qt.BrushStyle.NoBrush
+
+    def test_highlighting_does_not_change_exclude_state(self, loaded):
+        """Regression: recoloring the Exclude column's own checkbox item
+        would spuriously re-fire _on_exclude_toggled; skipping that column
+        must keep exclude state completely untouched by playhead movement."""
+        load_multi_pairs(loaded)
+        target = loaded.brightness_graph._rise_pairs[0]
+        loaded.brightness_graph.set_frame(target.orig_frame)
+        assert loaded._rise_excluded == set()
+        assert loaded._fall_excluded == set()
+
+    def test_scroll_suppressed_during_playback(self, loaded, monkeypatch):
+        load_multi_pairs(loaded)
+        calls = []
+        monkeypatch.setattr(
+            type(loaded.rise_results_table), "scrollTo",
+            lambda self, *a, **k: calls.append(a))
+        loaded._playback_timer.start(1000)
+        try:
+            target = loaded.brightness_graph._rise_pairs[2]
+            loaded.brightness_graph.set_frame(target.orig_frame)
+        finally:
+            loaded._playback_timer.stop()
+        assert calls == []
+
+    def test_scroll_happens_when_not_playing(self, loaded, monkeypatch):
+        load_multi_pairs(loaded)
+        calls = []
+        monkeypatch.setattr(
+            type(loaded.rise_results_table), "scrollTo",
+            lambda self, *a, **k: calls.append(a))
+        target = loaded.brightness_graph._rise_pairs[2]
+        loaded.brightness_graph.set_frame(target.orig_frame)
+        assert len(calls) == 1
+
+    def test_highlight_survives_a_table_repopulate(self, loaded):
+        load_multi_pairs(loaded)
+        target = loaded.brightness_graph._rise_pairs[1]
+        loaded.brightness_graph.set_frame(target.orig_frame)
+        assert loaded._rise_results_model.item(1, loaded._orig_frame_col).background().color().getRgb() \
+            == self._HIGHLIGHT_RGBA
+
+        loaded._update_results_table()  # e.g. as triggered by an FPS change, Clear All, etc.
+
+        item = loaded._rise_results_model.item(1, loaded._orig_frame_col)
+        assert item.background().color().getRgb() == self._HIGHLIGHT_RGBA
+
+    def test_no_crash_when_pair_direction_gated_off_by_pinned_polarity(self, loaded):
+        load_multi_pairs(loaded)
+        target = loaded.brightness_graph._rise_pairs[0]
+        loaded.brightness_graph.set_frame(target.orig_frame)
+
+        loaded._results_polarity = "falling"  # rising is no longer covered
+        loaded._update_results_table()  # must not raise

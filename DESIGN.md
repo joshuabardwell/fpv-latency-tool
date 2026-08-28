@@ -80,6 +80,18 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    (first use of a proxy model in this codebase) so the "Show Excluded"
    filter doesn't require rebuilding the underlying `QStandardItemModel` —
    avoids reentering the model's own `itemChanged` signal from its handler.
+   The playhead landing on a matched frame also tints that pair's row (not
+   the Exclude column, to avoid the same reentrance) and scrolls it into
+   view, via a second, playhead-only signal (`playhead_pair_changed`) kept
+   deliberately separate from the existing hover-aware ring highlight
+   (`_resolve_highlight_pair`) — hovering a marker highlights it on the graph
+   but does not touch the results table. Auto-scroll is suppressed while
+   `_playback_timer` is running, so continuous playback doesn't yank the
+   table view on every transition it sweeps past; the row still tints.
+   `MainWindow._apply_playhead_highlight` is idempotent and re-resolves the
+   highlighted pair fresh against the current table on every call (from
+   either the signal or the end of `_update_results_table`), so it
+   self-heals regardless of which fires first around a redetect.
 
 ## Threading model
 

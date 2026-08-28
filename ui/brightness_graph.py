@@ -86,6 +86,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
     pairs_updated = pyqtSignal()
     visible_range_changed = pyqtSignal(float, float)  # X-axis zoom/pan window changed
     domain_changed = pyqtSignal(float, float)          # plotted-data range changed (set_data/clear_data)
+    playhead_pair_changed = pyqtSignal(object)          # LatencyPair | None -- playhead only, not hover
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -201,6 +202,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._current_frame: int | None = None
         self._hover_matched_frame: int | None = None
         self._connector_y_level: float = 0.0
+        # Playhead-only counterpart of the frame_to_pair highlight above —
+        # deliberately ignores hover, unlike _resolve_highlight_pair().
+        self._last_playhead_pair: LatencyPair | None = None
 
         # Manually-excluded pair indices (into _rise_pairs/_fall_pairs), set by
         # MainWindow via set_excluded_pairs — pure rendering hint, cleared
@@ -281,6 +285,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
             ))
             self._current_frame = frame
             self._update_marker_highlight()
+            self._update_playhead_pair_signal()
 
     def set_visible_range(self, start: float, end: float) -> None:
         """Set the graph's visible X window (zoom/pan), clamped to the
@@ -325,6 +330,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._hover_matched_frame = None
         self._sc_highlight.setData(x=[], y=[])
         self._connector_highlight.setData(x=[], y=[])
+        self._update_playhead_pair_signal()
         self.domain_changed.emit(0.0, -1.0)
         self.pairs_updated.emit()
 
@@ -584,8 +590,15 @@ class BrightnessGraphWidget(pg.PlotWidget):
             self._frame_to_pair[p.orig_frame] = p
             self._frame_to_pair[p.disp_frame] = p
         self._update_marker_highlight()
+        self._update_playhead_pair_signal()
 
         self.pairs_updated.emit()
+
+    def _update_playhead_pair_signal(self) -> None:
+        pair = self._frame_to_pair.get(self._current_frame) if self._current_frame is not None else None
+        if pair is not self._last_playhead_pair:
+            self._last_playhead_pair = pair
+            self.playhead_pair_changed.emit(pair)
 
     def _populate(
         self,
