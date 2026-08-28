@@ -309,3 +309,72 @@ class TestDriftImmunity:
         clean_edges, _ = characterize_signal(clean, [10], [25], 3.0)
         drift_edges, _ = characterize_signal(drifted, [10], [25], 3.0)
         assert drift_edges[10].baseline > clean_edges[10].baseline
+
+
+class TestDriftAwareBand:
+    """Regression tests from real 240fps footage, where a display's dark level
+    crept ~0.35 levels/frame for 20+ frames before each flash — an ROI slightly
+    larger than the screen inside it. Sized only for frame-to-frame scatter,
+    the band let the backward walk sail through that creep and report a 0.00 ms
+    latency, which is physically impossible."""
+
+    def _creeping_signal(self):
+        """Baseline creeping upward, then a genuine hard transition at frame 40.
+        Shaped after the real clip: the creep is ~0.35/frame, the transition
+        jumps ~90 levels in one frame."""
+        data = np.empty(70, dtype=np.float64)
+        data[:40] = 98.0 + np.arange(40) * 0.35   # 98 -> 111.6
+        data[40] = 147.0
+        data[41] = 173.0
+        data[42] = 192.0
+        data[43:] = 210.0
+        return data
+
+    def test_creeping_baseline_does_not_pull_first_light_early(self):
+        data = self._creeping_signal()
+        edges, _ = characterize_signal(data, [40], [], 3.0)
+        # The transition is at 40. Anything materially earlier means the walk
+        # back has traversed the creep instead of stopping at the real edge.
+        assert edges[40].first_frame == 40
+
+    def test_mild_creep_is_compensated_silently(self):
+        """A creep small relative to amplitude (here ~8 levels of drift across
+        the measurement window against a 103-level step) is handled by the
+        adaptive band and does NOT raise a per-transition warning. The
+        measurement is correct, so flagging it would be noise — and a warning
+        that fires on every mild creep is one the user learns to ignore.
+
+        Drift at this scale is still caught where it belongs: as a per-ROI
+        verdict (unstable baseline / inconsistent contrast) rather than a
+        per-transition one."""
+        data = self._creeping_signal()
+        edges, _ = characterize_signal(data, [40], [], 3.0)
+        assert edges[40].warnings == ()
+
+    def test_creep_large_against_amplitude_is_flagged(self):
+        """The other side of the line: when the level moves by a serious
+        fraction of the step itself, the measurement really is suspect."""
+        data = np.empty(70, dtype=np.float64)
+        data[:40] = 20.0 + np.arange(40) * 2.5  # 20 -> 117.5, steep
+        data[40:] = 220.0
+        edges, _ = characterize_signal(data, [40], [], 3.0)
+        assert W_UNSTEADY_LEVEL in edges[40].warnings
+
+    def test_clean_signal_keeps_a_tight_band(self):
+        """The drift term is self-calibrating: with no tilt it contributes
+        nothing, so precision on good footage is not sacrificed to robustness
+        on bad. A 4-frame ramp still measures as 4 frames."""
+        edges, _ = edges_of(ramped_wave())
+        assert edges[10].first_frame == 10
+        assert edges[10].full_frame == 14
+
+    def test_drift_term_applies_to_first_light_only(self):
+        """Fully-lit is found by scanning FORWARD and stops at the first
+        qualifying frame, so it never traverses drift — widening its band would
+        buy no robustness and cost real precision. Applying the term to both
+        sides made this 4-frame ramp measure as 3, because the plateau window
+        starts close enough to the ramp that its 'tilt' is the ramp's own tail.
+        """
+        data = ramped_wave()
+        edges, _ = characterize_signal(data, [10], [25], 3.0)
+        assert edges[10].ramp_frames == 4

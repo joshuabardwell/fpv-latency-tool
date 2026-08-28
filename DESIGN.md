@@ -234,11 +234,32 @@ measures exactly as it did before this split existed.
 
 Baseline, plateau and noise are all measured **locally**, per transition, from
 the flat runs immediately either side of it. Nothing is computed once globally
-and reused. Drift that is slow relative to the flash period — an ROI drawn
-larger than the display, with the display slowly moving within it — is
-therefore absorbed for free: each transition calibrates against its own local
-levels. Verified by test: first-light is exact under drift, fully-lit within
-one frame.
+and reused. Each transition calibrates against its own local levels.
+
+"Local" means local in **time**, not merely local to the neighbouring
+transitions, and the distinction is not academic. On real 240fps footage the
+gap between flashes ran to 276 frames, and that stretch drifted 143 levels end
+to end; a median over all of it is nothing like the level immediately before
+the transition. `LEVEL_WINDOW_FRAMES` caps each level's measurement window to
+the frames nearest the transition. `estimate_noise` chunks flat runs by the
+same window before taking residuals, for the same reason — measured in one
+pass over a whole drifting run, a display's sigma came out at 17 levels when
+its actual frame-to-frame scatter was well under one.
+
+**The band widens with the baseline's own wander** (`DRIFT_BAND_K` × the
+measured tilt), and this applies to the **first-light band only**. First-light
+is found by walking *backward* from the anchor, so it traverses the baseline
+and will run the entire length of any creep it cannot distinguish from signal.
+Real footage had a display's dark level climbing ~0.35 levels/frame for 20+
+frames before each flash; with a band sized only for frame-to-frame scatter the
+walk sailed straight through it and reported **0.00 ms latency**, which is
+physically impossible. Fully-lit is found by scanning *forward* and stops at
+the first qualifying frame, so it never traverses drift — widening its band
+buys no robustness and costs real precision, and doing so made a 4-frame
+synthetic ramp measure as 3.
+
+The drift term is self-calibrating: with no tilt it contributes nothing, so
+precision on clean footage is not sacrificed to robustness on drifting footage.
 
 Sigma takes the **larger** of the local and pooled estimates. Local alone keeps
 drift out, but a MAD over the dozen frames either side of one transition has
@@ -265,7 +286,18 @@ The two levels drive **different UI**, and the distinction matters: the ⚠
 column and Exclude Flagged key on per-transition flags; the banner keys on the
 per-signal verdict. A steadily drifting baseline flags the *signal* but flags
 no individual pair, because under pure drift every transition is still locally
-well-measured and its latency is genuinely fine.
+well-measured and its latency is genuinely fine. Drift mild relative to the
+step is absorbed by the adaptive band and raises no per-transition warning at
+all — the measurement is correct, so flagging it would be noise, and a warning
+that fires on every mild creep is one the user learns to ignore.
+
+`unsteady-level` compares the **tilt** of a level region (medians of its first
+and last quarters) against both a fraction of amplitude and a multiple of
+sigma. Peak-to-peak was the obvious first choice and is wrong: ptp grows with
+noise, so on real footage it called a perfectly flat but noisy display region
+drifting — flagging every pair of a good clip, which is precisely how a warning
+gets trained into being ignored. Both terms are needed; the sigma term is what
+separates a noisy level from a moving one.
 
 The guard warns and never suppresses. A flag is a prompt to look, not a
 verdict; Exclude Flagged is a button the user presses, and it reuses the
@@ -281,7 +313,9 @@ Two estimator subtleties worth not re-deriving:
   transitions, not half of it. Half made the verdict depend on how much empty
   space happened to surround a transition rather than on the transition itself.
 
-All six thresholds are named constants in `core/edges.py` and are reasoned
+All the thresholds are named constants in `core/edges.py`. They have been
+calibrated against one real 240fps clip (4 transitions) plus synthetic cases,
+which is a start, not a validation — they are still
 first guesses that still need tuning against real footage.
 
 ### Limits of the locate stage

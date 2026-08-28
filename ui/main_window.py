@@ -1431,7 +1431,11 @@ class MainWindow(QMainWindow):
         """Surface the whole-signal verdict and the flagged-pair count. Names
         which ROI is at fault and suggests the likely cause — a bare warning
         count would leave the user guessing which of the two to re-draw."""
-        pairs = self.brightness_graph.get_pairs()
+        # Pinned polarity, matching the results tables and the CSV — counting
+        # over the live pulldown instead would let the banner report pairs the
+        # tables aren't showing.
+        rise_pairs, fall_pairs, _ = self._current_direction_pairs()
+        pairs = rise_pairs + fall_pairs
         orig_quality, disp_quality = self.brightness_graph.get_signal_quality()
         flagged = sum(1 for p in pairs if not p.is_clean())
 

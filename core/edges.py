@@ -36,6 +36,16 @@ import numpy as np
 MIN_FLAT_FRAMES = 3    # frames needed either side to estimate a local sigma
 RAMP_GUARD_FRAMES = 2  # frames each side of an anchor never counted as "flat"
 
+# How many frames either side of a transition its levels are measured from.
+# The gap between transitions can be hundreds of frames — on real 240fps
+# footage the stretch before a flash ran to 276 frames, drifting 143 levels
+# end to end — and a median over all of that is not the level immediately
+# before the transition. Capping the window is what makes "measured locally"
+# mean local in TIME rather than merely local to the neighbouring transitions.
+# Long enough for a stable median and sigma, short enough that drift within it
+# is negligible: 24 frames is 0.1s at 240fps.
+LEVEL_WINDOW_FRAMES = 24
+
 # --- band floors ----------------------------------------------------------
 # The band is what separates "still at the baseline" from "changing". Two
 # floors keep it sane when sigma is tiny or zero, which is exactly the case
@@ -43,6 +53,17 @@ RAMP_GUARD_FRAMES = 2  # frames each side of an anchor never counted as "flat"
 MIN_BAND_ABS = 0.5        # gray levels (0-255)
 MIN_BAND_FRACTION = 0.02  # of this transition's amplitude
 DEFAULT_SIGMA_K = 3.0     # band = k * sigma, before the floors above
+
+# The band must also beat the baseline's own wander. Frame-to-frame scatter is
+# not the only thing that can move a level: a display drifting inside an
+# oversized ROI creeps steadily, and on real footage a display's dark level
+# climbed ~0.35 levels/frame for 20+ frames before a flash. Walking back from
+# the anchor with a band sized only for scatter sails straight through that
+# creep and reports first-light dozens of frames early — a 0 ms latency, which
+# is physically impossible. Scaling the band by the measured tilt is
+# self-calibrating: on clean footage the tilt is ~0 and the band stays tight,
+# so precision on good clips is not sacrificed to robustness on bad ones.
+DRIFT_BAND_K = 2.5
 
 # --- quality thresholds ---------------------------------------------------
 # First guesses. They must be tuned against real footage: too loose and they
@@ -53,6 +74,8 @@ RAMP_MAX_FRACTION = 0.5  # ramp filling more than this share of the gap between
 SPREAD_MAX = 0.25        # as a fraction of amplitude: how far a level may swing
                          # within one transition, and how far levels may differ
                          # between transitions, before either is called dirty
+TILT_SIGMA_K = 2.0       # a level's tilt must also beat this many sigma before
+                         # it counts as drift rather than scatter
 
 W_LOW_SNR = "low-snr"
 W_AMBIGUOUS_EDGE = "ambiguous-edge"
@@ -156,11 +179,32 @@ def estimate_noise(
     residuals = []
     for lo, hi in _flat_segments(len(data), anchors, guard):
         segment = data[lo:hi]
-        if segment.size:
-            residuals.append(segment - np.median(segment))
+        # Chunk before taking residuals. A flat stretch can run to hundreds of
+        # frames, and a level that drifts across it would be counted as noise
+        # if residuals were taken about a single median for the whole thing —
+        # on real footage that inflated a display's sigma to 17 levels when its
+        # actual frame-to-frame scatter was a fraction of that.
+        for start in range(0, segment.size, LEVEL_WINDOW_FRAMES):
+            chunk = segment[start : start + LEVEL_WINDOW_FRAMES]
+            if chunk.size >= MIN_FLAT_FRAMES:
+                residuals.append(chunk - np.median(chunk))
     if not residuals:
         return 0.0
     return _mad(np.concatenate(residuals))
+
+
+def _tilt(segment: np.ndarray) -> float:
+    """Systematic drift across a region: how far its last quarter's level sits
+    from its first quarter's.
+
+    Medians of quarters rather than peak-to-peak, because ptp grows with noise
+    and would call a merely noisy level a drifting one — on real footage a
+    perfectly flat but noisy display region had a 45-level ptp against a
+    4-level actual tilt."""
+    if segment.size < 4:
+        return 0.0
+    k = max(2, segment.size // 4)
+    return abs(float(np.median(segment[-k:]) - np.median(segment[:k])))
 
 
 def _first_departure(
@@ -214,8 +258,10 @@ def _characterize_one(
     better no reading than a fabricated one."""
     rising = polarity == "rising"
 
-    pre = data[lo : max(lo, anchor - RAMP_GUARD_FRAMES)]
-    post = data[min(hi, anchor + RAMP_GUARD_FRAMES + 1) : hi]
+    # Only the frames nearest the transition on each side: the tail of the run
+    # before it, and the head of the run after it. See LEVEL_WINDOW_FRAMES.
+    pre = data[lo : max(lo, anchor - RAMP_GUARD_FRAMES)][-LEVEL_WINDOW_FRAMES:]
+    post = data[min(hi, anchor + RAMP_GUARD_FRAMES + 1) : hi][:LEVEL_WINDOW_FRAMES]
     if pre.size == 0 or post.size == 0:
         return None
 
@@ -244,9 +290,21 @@ def _characterize_one(
     else:
         sigma = global_sigma
 
+    level_tilt = max(_tilt(pre), _tilt(post))
     band = max(sigma_k * sigma, MIN_BAND_FRACTION * amplitude, MIN_BAND_ABS)
 
-    first_threshold = baseline + band if rising else baseline - band
+    # The drift term applies to the first-light band only, and deliberately so.
+    # First-light is found by walking BACKWARD from the anchor, so it traverses
+    # the baseline and will run the whole length of any creep it can't
+    # distinguish from signal. Fully-lit is found by scanning FORWARD to the
+    # first frame that reaches the settled level; it stops at the first
+    # qualifying frame and never traverses drift, so widening its band buys no
+    # robustness and costs real precision. Applying it to both sides made a
+    # 4-frame synthetic ramp measure as 3, because the plateau window starts
+    # close enough to the ramp that its "tilt" is the tail of the ramp itself.
+    first_band = max(band, DRIFT_BAND_K * _tilt(pre))
+
+    first_threshold = baseline + first_band if rising else baseline - first_band
     full_threshold = plateau - band if rising else plateau + band
 
     first_frame = _first_departure(data, anchor, lo, hi, first_threshold, rising)
@@ -279,8 +337,13 @@ def _characterize_one(
     # cannot: when the climb fills the window, the plateau median is taken over
     # the climb itself, so the signal appears to settle early and the ramp
     # measures short. Whether the "flat" regions are flat gives it away.
-    level_swing = max(float(np.ptp(pre)), float(np.ptp(post)))
-    if level_swing > SPREAD_MAX * amplitude:
+    #
+    # The sigma term matters as much as the amplitude one. Without it, a noisy
+    # but perfectly level region trips this purely because scatter is a large
+    # fraction of a small amplitude — on real footage that flagged every pair
+    # of a good clip, which is exactly how a warning gets trained into being
+    # ignored.
+    if level_tilt > max(SPREAD_MAX * amplitude, TILT_SIGMA_K * sigma):
         warnings.append(W_UNSTEADY_LEVEL)
     # Measured against the WHOLE gap to the neighbouring transitions, not half
     # of it. Half made the verdict depend on how much empty space happened to
