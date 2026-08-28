@@ -504,6 +504,41 @@ class TestKeyboardNavigation:
         assert loaded._rise_results_model.rowCount() == 0
         assert loaded._fall_results_model.rowCount() == 0
 
+    def test_no_scrolling_widget_can_steal_navigation_keys(self, loaded):
+        """Regression, twice over. QScrollArea (wrapping the left column) and
+        BrightnessGraphWidget (a pyqtgraph PlotWidget, therefore a
+        QGraphicsView) are both QAbstractScrollArea subclasses. That class
+        handles the arrow keys itself to scroll its viewport, and defaults to
+        StrongFocus — so any one of them that can take focus swallows every
+        navigation key before MainWindow.keyPressEvent ever sees it. Frame
+        stepping and transition jumps just stop working after a click.
+
+        Asserted over every such widget rather than the two known offenders, so
+        a third one added later fails here instead of in the user's hands.
+        """
+        from PyQt6.QtWidgets import QAbstractScrollArea
+
+        offenders = sorted(
+            type(w).__name__
+            for w in loaded.findChildren(QAbstractScrollArea)
+            if w.isVisible() and w.focusPolicy() != Qt.FocusPolicy.NoFocus
+        )
+        assert offenders == []
+
+    def test_arrows_survive_a_click_on_the_graph(self, loaded, qtbot):
+        """Dispatches through the focus chain, unlike
+        test_arrow_steps_frame_via_window which sends keys straight at the
+        window — bypassing focus entirely, which is exactly how that test
+        stayed green while the real app was broken.
+
+        Clicking the graph is the specific thing that broke it: click-to-seek
+        made it a routine action, and before that nobody clicked there."""
+        qtbot.mouseClick(loaded.brightness_graph, Qt.MouseButton.LeftButton)
+        before = loaded.timeline.current_frame
+        target = loaded.focusWidget() or loaded
+        qtbot.keyClick(target, Qt.Key.Key_Right)
+        assert loaded.timeline.current_frame == before + 1
+
     @pytest.mark.parametrize("table_attr", ["rise_results_table", "fall_results_table"])
     def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot, table_attr):
         """Regression: results tables had no focus policy, so QTableView's

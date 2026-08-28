@@ -485,6 +485,12 @@ class MainWindow(QMainWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # NoFocus for the same reason every other widget in this column has it:
+        # QAbstractScrollArea handles the arrow keys itself (to scroll its
+        # viewport) and defaults to StrongFocus, so once it took click focus it
+        # swallowed every navigation key before MainWindow.keyPressEvent could
+        # see them. Wheel and scrollbar-drag scrolling do not need focus.
+        left_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         left_scroll.setWidget(left_widget)
         splitter.addWidget(left_scroll)
 
