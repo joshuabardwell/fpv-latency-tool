@@ -790,3 +790,219 @@ class TestHoverCursorAndLine:
         pos = QPoint(50, 50)
         _move(g, pos)  # must not raise
         assert not g._hover_line.isVisible()
+
+
+def load_graph_with_ramps(qtbot):
+    """Both signals ramp rather than switching instantly, so first-light and
+    fully-lit land on different frames and the new markers are distinguishable.
+
+    orig: dark 0-4, ramp 5-7, bright 8-14, ramp 15-17, dark 18-29
+          -> rising first=5 full=8, falling first=15 full=18
+    disp: the same shape delayed by 4 frames.
+    """
+    g = make_graph(qtbot)
+    g.resize(400, g.height())
+    g.show()
+    qtbot.waitExposed(g)
+
+    def shape(delay):
+        d = np.full(30, 20.0)
+        d[5 + delay : 8 + delay] = [70.0, 120.0, 170.0]
+        d[8 + delay : 15 + delay] = 220.0
+        d[15 + delay : 18 + delay] = [170.0, 120.0, 70.0]
+        d[18 + delay :] = 20.0
+        return d
+
+    g.set_data(shape(0), shape(4), in_point=0)
+    return g
+
+
+class TestEdgeMarkers:
+    def test_both_first_light_and_fully_lit_are_drawn(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert sorted(g._sc_rise_orig.data["x"]) == [5.0, 8.0]
+
+    def test_instantaneous_transition_draws_one_marker_not_two(self, qtbot):
+        """first == full on a square wave, so the two triangles would land on
+        the same frame; drawing both would just darken that pixel. This signal
+        has two rising transitions, so two markers total -- not four."""
+        g = load_graph_with_pairs(qtbot)
+        assert list(g._sc_rise_orig.data["x"]) == [5.0, 15.0]
+
+    def test_anchor_is_no_longer_drawn_on_its_own(self, qtbot):
+        """The steepest step stays internal — it drives pairing and
+        min-spacing, but it is not one of the three reported frames."""
+        g = load_graph_with_ramps(qtbot)
+        # Anchor for the orig rising ramp is inside 5..8 but is only drawn if
+        # it happens to coincide with first or full.
+        assert set(g._sc_rise_orig.data["x"]) == {5.0, 8.0}
+
+
+class TestMidpointMarker:
+    def test_midpoint_sits_at_the_half_frame_with_interpolated_y(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        xs = list(g._sc_mid_rise_orig.data["x"])
+        assert xs == [6.5]
+        # Between samples 6 (120.0) and 7 (170.0) -> 145.0.
+        assert g._sc_mid_rise_orig.data["y"][0] == pytest.approx(145.0)
+
+    def test_no_midpoint_for_an_instantaneous_transition(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        assert len(g._sc_mid_rise_orig.data["x"]) == 0
+
+    def test_midpoint_reads_as_secondary_to_the_real_markers(self):
+        from ui.brightness_graph import _MID_MARKER, _MID_MARKER_SIZE
+        # It is a derived position, not an observation, so it must not compete
+        # with the two measured frames: smaller than their 9px triangles, and
+        # achromatic so it never reads as a signal color.
+        assert _MID_MARKER_SIZE < 9
+        assert len(set(_MID_MARKER)) == 1
+
+
+class TestNavigationLandsOnFirstLight:
+    def test_one_stop_per_transition_not_three(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        # 4 transitions on orig (rise, fall) x (orig, disp) = 4 first-light
+        # frames: orig 5, 15; disp 9, 19.
+        assert g._transition_frames == [5, 9, 15, 19]
+
+    def test_next_transition_skips_the_fully_lit_frame(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        # From just before the first ramp, the next stop is first-light (5),
+        # then the display's first-light (9) -- never the fully-lit 8.
+        assert g.next_transition(4) == 5
+        assert g.next_transition(5) == 9
+
+    def test_prev_transition_also_lands_on_first_light(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert g.prev_transition(15) == 9
+
+
+class TestFrameToPairOverEdges:
+    def test_every_marker_frame_of_a_pair_resolves_to_it(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        rise = g._rise_pairs[0]
+        for frame in (5, 8, 9, 12):  # orig first/full, disp first/full
+            assert g._frame_to_pair[frame] is rise
+
+    def test_orig_marker_frames_disambiguates_which_signal(self, qtbot):
+        """A pair owns four frames now, so which signal a frame belongs to can
+        no longer be inferred by comparing it against the pair's anchors."""
+        g = load_graph_with_ramps(qtbot)
+        assert 5 in g._orig_marker_frames and 8 in g._orig_marker_frames
+        assert 9 not in g._orig_marker_frames and 12 not in g._orig_marker_frames
+
+
+class TestClickSnapping:
+    def test_snaps_to_an_edge_marker(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert g._hit_test_any_marker(_marker_widget_pos(g, 8, "orig")) == 8
+
+    def test_never_snaps_to_a_midpoint(self, qtbot):
+        """Seeking to a half-frame no sample exists at would be a lie, so the
+        midpoint dot is drawn but is not a hit-test candidate."""
+        g = load_graph_with_ramps(qtbot)
+        snapped = [
+            g._hit_test_any_marker(_marker_widget_pos(g, f, "orig"))
+            for f in (5, 8, 15, 18)
+        ]
+        assert all(s in (5, 8, 15, 18) for s in snapped if s is not None)
+        assert 6 not in snapped and 7 not in snapped
+
+
+class TestWarningOutlines:
+    def test_flagged_transition_markers_carry_the_warning_pen(self, qtbot):
+        from ui.brightness_graph import _WARN_OUTLINE
+
+        g = make_graph(qtbot)
+        # The baseline tilts steadily before the step, so the "flat" region it
+        # is measured from is not flat: unsteady-level. The tilt's per-frame
+        # steps stay well under delta, so detection still finds exactly one
+        # transition and this stays a test of edges.py's verdict, not of
+        # detection's sensitivity.
+        orig = np.full(40, 220.0)
+        orig[:10] = np.linspace(20.0, 120.0, 10)
+        orig[25:] = 20.0
+        g.set_data(orig, orig.copy(), in_point=0)
+        g.set_delta(50)
+
+        pens = g._sc_rise_orig.data["pen"]
+        assert any(p.color().getRgb()[:3] == _WARN_OUTLINE for p in pens)
+
+    def test_clean_signal_carries_no_warning_pen(self, qtbot):
+        # A clean signal skips the pen= override entirely, leaving per-point
+        # pens as None; a flagged one materializes real QPens. The contract is
+        # "no marker wears the warning color", which covers both.
+        from ui.brightness_graph import _WARN_OUTLINE
+
+        g = load_graph_with_ramps(qtbot)
+        pens = g._sc_rise_orig.data["pen"]
+        assert all(
+            p is None or p.color().getRgb()[:3] != _WARN_OUTLINE for p in pens
+        )
+
+
+class TestSignalQualityAccessor:
+    def test_clean_signal_reports_clean(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        orig_q, disp_q = g.get_signal_quality()
+        assert orig_q.is_clean and disp_q.is_clean
+
+    def test_no_data_reports_clean(self, qtbot):
+        g = make_graph(qtbot)
+        orig_q, disp_q = g.get_signal_quality()
+        assert orig_q.is_clean and disp_q.is_clean
+
+
+class TestSigmaK:
+    def test_setting_sigma_k_moves_the_measured_frames(self, qtbot):
+        """Needs real noise: on noiseless data sigma is exactly 0, so the band
+        falls back to its amplitude/absolute floors and k has no effect at all
+        -- correct behavior, but it would make this test vacuous."""
+        g = make_graph(qtbot)
+        rng = np.random.default_rng(11)
+        base = np.full(40, 20.0)
+        base[10:14] = [70.0, 120.0, 170.0, 210.0]
+        base[14:30] = 220.0
+        base[30:] = 20.0
+        data = base + rng.normal(0.0, 3.0, 40)
+        g.set_data(data, data.copy(), in_point=0)
+        g.set_delta(40)
+
+        g.set_sigma_k(1.0)
+        loose = list(g._sc_rise_orig.data["x"])
+        g.set_sigma_k(12.0)
+        tight = list(g._sc_rise_orig.data["x"])
+        assert tight != loose
+
+    def test_sigma_k_has_no_effect_without_noise(self, qtbot):
+        """Corollary, worth pinning: a clean signal measures the same at any
+        sensitivity, so the knob can never make good footage worse."""
+        g = load_graph_with_ramps(qtbot)
+        before = list(g._sc_rise_orig.data["x"])
+        g.set_sigma_k(40.0)
+        assert list(g._sc_rise_orig.data["x"]) == before
+
+    def test_sigma_k_is_never_negative(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.set_sigma_k(-5.0)
+        assert g._sigma_k == 0.0
+
+
+class TestExcludedCoversEdgeMarkers:
+    def test_muting_covers_both_markers_of_an_excluded_transition(self, qtbot):
+        from ui.brightness_graph import _MUTED_MARKER
+
+        g = load_graph_with_ramps(qtbot)
+        g.set_excluded_pairs({0}, set())
+        brushes = g._sc_rise_orig.data["brush"]
+        # Both first-light and fully-lit go gray, not just one of them.
+        assert len(brushes) == 2
+        assert all(b.color().getRgb()[:3] == _MUTED_MARKER for b in brushes)
+
+    def test_falling_markers_unaffected_by_a_rising_exclusion(self, qtbot):
+        """Regression: unioning the two excluded sets would let a rising
+        exclusion mute a falling marker that shares a frame."""
+        g = load_graph_with_ramps(qtbot)
+        g.set_excluded_pairs({0}, set())
+        assert g._sc_fall_orig.data["brush"][0] is None

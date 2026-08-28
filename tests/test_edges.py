@@ -204,6 +204,23 @@ class TestPerTransitionWarnings:
         assert all(not e.is_clean for e in edges.values())
         assert all(W_UNSTEADY_LEVEL in e.warnings for e in edges.values())
 
+    def test_identical_ramps_get_the_same_verdict_either_side(self):
+        """Regression: slow-ramp was measured against HALF the gap to the
+        neighbouring transitions, so the same 3-frame ramp came out flagged
+        when its neighbours were close and clean when they were far. A
+        transition's verdict must depend on the transition, not on how much
+        empty space happens to surround it."""
+        data = np.full(30, DARK, dtype=np.float64)
+        data[5:8] = [70.0, 120.0, 170.0]
+        data[8:15] = BRIGHT
+        data[15:18] = [170.0, 120.0, 70.0]
+        data[18:] = DARK
+        edges, _ = characterize_signal(data, [5], [15], 3.0)
+        # Both are 3-frame ramps; neither is drift.
+        assert edges[5].ramp_frames == edges[15].ramp_frames == 3
+        assert W_SLOW_RAMP not in edges[5].warnings
+        assert W_SLOW_RAMP not in edges[15].warnings
+
     def test_slow_ramp_fires_when_the_edge_never_settles(self):
         """A transition whose climb outruns its own window: no frame in range
         ever reaches the settled level."""

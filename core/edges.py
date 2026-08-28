@@ -48,7 +48,8 @@ DEFAULT_SIGMA_K = 3.0     # band = k * sigma, before the floors above
 # First guesses. They must be tuned against real footage: too loose and they
 # never fire, too tight and they cry wolf until the warnings get ignored.
 SNR_MIN = 6.0            # amplitude / sigma below this is "low-snr"
-RAMP_MAX_FRACTION = 0.5  # ramp longer than this share of the half-window is drift
+RAMP_MAX_FRACTION = 0.5  # ramp filling more than this share of the gap between
+                         # neighbouring transitions is drift, not a transition
 SPREAD_MAX = 0.25        # as a fraction of amplitude: how far a level may swing
                          # within one transition, and how far levels may differ
                          # between transitions, before either is called dirty
@@ -281,8 +282,14 @@ def _characterize_one(
     level_swing = max(float(np.ptp(pre)), float(np.ptp(post)))
     if level_swing > SPREAD_MAX * amplitude:
         warnings.append(W_UNSTEADY_LEVEL)
-    half_window = max(1.0, (hi - lo) / 2.0)
-    if W_SLOW_RAMP not in warnings and (full_frame - first_frame) > RAMP_MAX_FRACTION * half_window:
+    # Measured against the WHOLE gap to the neighbouring transitions, not half
+    # of it. Half made the verdict depend on how much empty space happened to
+    # surround a transition rather than on the transition itself: the same
+    # 3-frame ramp came out flagged when its neighbours were close and clean
+    # when they were far. A ramp filling most of the gap between transitions is
+    # unambiguously pathological; a few frames of LCD settling is not.
+    span = max(1.0, float(hi - lo))
+    if W_SLOW_RAMP not in warnings and (full_frame - first_frame) > RAMP_MAX_FRACTION * span:
         warnings.append(W_SLOW_RAMP)
 
     return TransitionEdge(
