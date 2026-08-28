@@ -10,8 +10,10 @@ Measures glass-to-glass latency by analyzing a video that captures two screens s
 - **ROI selection** — click-and-drag rectangles over each screen; live mean-brightness readout updates as you scrub
 - **Brightness extraction** — runs in a background thread; progress bar with cancel
 - **Derivative-based transition detection** — finds rising and falling edges via per-frame brightness change; configurable min ΔBrightness, min spacing, and max latency window
+- **Three latency metrics** — first-pixel (the frame light first appears), full-frame (the frame the screen is fully lit) and average, the mean of the two. Each compares the same point on the transition curve at both ends, so a slow rise on the source can't inflate the number
 - **Transition pairing** — greedy nearest-following match; unmatched transitions highlighted red on the graph
-- **Results table** — transition #, original frame, display frame, direction, latency in frames and ms; click a row to jump to that frame; CSV export
+- **Measurement-quality warnings** — flags transitions whose measurement can't be trusted (low contrast, motion mid-transition, a baseline that isn't level) and ROIs whose brightness drifts across the clip; warns rather than hiding, with an "Exclude Flagged" button when you agree
+- **Results table** — original frame, display frame, and first-pixel / average / full-frame latency in ms; click a row to jump to that frame; CSV export carries all three in frames and ms, plus any warnings
 - **FPS verification** — measure the test pattern's periodicity and cross-check against the known period to compute the true frame rate
 - **CLI parameters** — pre-fill settings from the command line for reproducible runs; "Show CLI Options" dialog copies the full command
 
@@ -100,6 +102,7 @@ python main.py [file]
                [--min-delta    INT]
                [--min-spacing  INT]
                [--max-latency  INT]
+               [--edge-sigma   FLOAT]
                [--in-point     INT]
                [--out-point    INT]
 ```
@@ -109,7 +112,7 @@ python main.py [file]
 | Key | Action |
 |-----|--------|
 | Left / Right | Step one frame |
-| Up / Down | Previous / next transition |
+| Up / Down | Previous / next transition (lands on first-pixel) |
 | PgUp / PgDn | Jump ~1 second |
 | Space | Play / pause |
 | I / O | Set in / out point at playhead |
@@ -132,7 +135,8 @@ fpv-latency-tool/
 ├── assets/                   # README diagrams (SVG)
 ├── .github/workflows/        # CI: tests + binaries on all 3 OSes
 ├── core/
-│   ├── detection.py          # derivative-based transition detection
+│   ├── detection.py          # derivative-based transition detection (which)
+│   ├── edges.py              # transition extent + quality checks (how far)
 │   ├── export.py             # CSV export
 │   ├── extractor.py          # QThread brightness extraction worker
 │   ├── latency.py            # LatencyPair dataclass + pairing algorithm

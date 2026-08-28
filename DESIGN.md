@@ -26,6 +26,8 @@ core/
   roi.py                  ROI dataclass: pixel rect, clipping, mean brightness
   extractor.py            BrightnessExtractor: QThread, sequential brightness pass
   detection.py            derivative-based transition detection (pure NumPy)
+  edges.py                TransitionEdge: measures each transition's extent
+                          (first-light / fully-lit) + quality checks
   latency.py              LatencyPair + pair_transitions (greedy matching)
   export.py               CSV export of latency pairs (stdlib csv)
   view_range.py            pure clamp/center/zoom/pan math for graph zoom
@@ -199,12 +201,102 @@ drag started until an incidental future move.
 
 ## Detection algorithm and its limits
 
-Detection is a **per-frame derivative threshold**: a transition exists where a
-single frame-to-frame brightness step exceeds delta. Consequences:
+Detection runs in **two stages**, deliberately kept in separate modules:
+
+1. **Locate** (`core/detection.py`) — *which* transitions exist. A per-frame
+   derivative threshold; a run of consecutive over-threshold steps collapses to
+   the frame of steepest change, the **anchor**. Pairing, Min Spacing and the
+   Original Period heuristic all key on anchors.
+2. **Characterize** (`core/edges.py`) — *how far each one extends*. Given the
+   anchor, walk outward to find first-light and fully-lit.
+
+The anchor is not drawn and is not reported. It is the most robust point on the
+curve for matching, but it is not any of the three metrics: on an asymmetric
+ramp the steepest step sits early, which is what made the single number this
+tool used to report neither first-pixel nor full-frame.
+
+### The three metrics
+
+    first-pixel latency = display first_frame - source first_frame
+    full-frame  latency = display full_frame  - source full_frame
+    average     latency = mean of the two
+
+Each compares the **same point on the curve at both ends**, so a slow rise on
+the source cannot inflate the result. Average is a genuine half-frame value
+when the two differ, which is a resolution gain, not a rounding artifact. Where
+either end could not be characterized, all three fall back to the anchor delta
+rather than mixing an edge frame against an anchor frame.
+
+For an instantaneous transition first = full = anchor, so a square-wave clip
+measures exactly as it did before this split existed.
+
+### Baseline drift, and why there is no detrending
+
+Baseline, plateau and noise are all measured **locally**, per transition, from
+the flat runs immediately either side of it. Nothing is computed once globally
+and reused. Drift that is slow relative to the flash period — an ROI drawn
+larger than the display, with the display slowly moving within it — is
+therefore absorbed for free: each transition calibrates against its own local
+levels. Verified by test: first-light is exact under drift, fully-lit within
+one frame.
+
+Sigma takes the **larger** of the local and pooled estimates. Local alone keeps
+drift out, but a MAD over the dozen frames either side of one transition has
+high variance and tends to come out low, and under-estimating sigma is the
+dangerous direction — it narrows the band and reports first-light early. The
+pooled figure is scatter about each segment's own median, so using it as a
+floor costs no drift immunity.
+
+There is deliberately **no detrending**. For slow drift it is redundant given
+local baselines; for fast drift the data is genuinely corrupt and subtracting a
+trend would hide that behind a plausible-looking number. Drift fast enough to
+matter within one transition is flagged instead.
+
+### The dirty-data guard
+
+Per transition (`TransitionEdge.warnings`): `low-snr`, `ambiguous-edge`,
+`slow-ramp`, `unsteady-level`. Per signal (`SignalQuality`):
+`unstable_baseline`, `inconsistent_amplitude`, each comparing transitions
+against each other — baselines **within a polarity only**, since on a square
+wave a rising transition's baseline is the dark level and a falling one's is
+the bright level.
+
+The two levels drive **different UI**, and the distinction matters: the ⚠
+column and Exclude Flagged key on per-transition flags; the banner keys on the
+per-signal verdict. A steadily drifting baseline flags the *signal* but flags
+no individual pair, because under pure drift every transition is still locally
+well-measured and its latency is genuinely fine.
+
+The guard warns and never suppresses. A flag is a prompt to look, not a
+verdict; Exclude Flagged is a button the user presses, and it reuses the
+existing exclusion sets rather than introducing a parallel mechanism.
+
+Two estimator subtleties worth not re-deriving:
+
+- The quality checks use **max-deviation-from-median, not MAD**, even though
+  MAD is used for noise. MAD is robust *to outliers*, and an outlier is exactly
+  what those checks exist to catch: one cycle at half amplitude among four good
+  ones leaves MAD at exactly zero.
+- `slow-ramp` measures the ramp against the **whole** gap to the neighbouring
+  transitions, not half of it. Half made the verdict depend on how much empty
+  space happened to surround a transition rather than on the transition itself.
+
+All six thresholds are named constants in `core/edges.py` and are reasoned
+first guesses that still need tuning against real footage.
+
+### Limits of the locate stage
+
+These are properties of stage 1 and are unchanged:
 
 - A slow multi-frame fade (LCD pixel response, exposure blending) where no
   single step crosses delta is **missed entirely**, even if the cumulative
   change is large. Lower delta or a faster test pattern edge is the workaround.
+  Characterization cannot rescue this: it only measures transitions the locate
+  stage already found.
+- A step change in ROI composition — the display snapping into frame — is
+  detected as a genuine transition. Characterization now flags it, but does not
+  suppress it; rejecting non-transition steps would mean changing the locate
+  stage, which would move existing measurements.
 - Delta is auto-computed on new data (10 % of the combined brightness range,
   min 5) only while the spinbox is untouched — a user-set or CLI threshold
   survives re-analysis.
