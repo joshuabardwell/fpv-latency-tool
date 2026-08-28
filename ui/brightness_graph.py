@@ -26,7 +26,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QPainterPath
 
 from core.detection import apply_min_spacing, find_falling, find_rising
@@ -36,6 +36,8 @@ from core.view_range import MIN_ZOOM_FRAMES, center_range, clamp_range, pan_rang
 _WHEEL_ZOOM_IN  = 0.85          # per-notch scale factor when zooming in
 _WHEEL_ZOOM_OUT = 1.0 / _WHEEL_ZOOM_IN
 _HOVER_HIT_R_PX = 10            # hover hit-test radius around a matched marker
+_CLICK_DRAG_THRESHOLD_PX = 4    # net displacement since press below which a
+                                 # release counts as a click, not a drag
 
 _GREEN     = (0, 230, 0)
 _AMBER     = (255, 160, 0)
@@ -87,6 +89,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
     visible_range_changed = pyqtSignal(float, float)  # X-axis zoom/pan window changed
     domain_changed = pyqtSignal(float, float)          # plotted-data range changed (set_data/clear_data)
     playhead_pair_changed = pyqtSignal(object)          # LatencyPair | None -- playhead only, not hover
+    frame_clicked = pyqtSignal(int)                     # a click (not a drag) seeked here
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -125,6 +128,17 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._sc_unmatched_fall = pg.ScatterPlotItem(pen=None, brush=pg.mkBrush(_RED), size=10, symbol="t")
         self.addItem(self._sc_unmatched_rise)
         self.addItem(self._sc_unmatched_fall)
+
+        # Hover indicator: a vertical line at the frame a click would seek to
+        # (hidden while dragging or hovering a marker -- see
+        # _update_cursor_and_line). Dashed and muted so it's never confused
+        # with the solid yellow playhead or the white ring highlight.
+        self._hover_line = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen((200, 200, 200, 120), width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._hover_line.setVisible(False)
+        self.addItem(self._hover_line)
 
         # Connector lines linking paired orig→disp markers
         self._pair_connectors = self.plot(pen=pg.mkPen((200, 200, 200, 100), width=1))
@@ -202,6 +216,16 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._current_frame: int | None = None
         self._hover_matched_frame: int | None = None
         self._connector_y_level: float = 0.0
+        # Broader hover state for click-to-snap: any visible marker
+        # (matched or unmatched), independent of _hover_matched_frame above
+        # which stays scoped to matched pairs for the ring highlight.
+        self._hover_any_marker_frame: int | None = None
+        # Frame under the cursor regardless of markers -- drives the hover
+        # line's position when no marker is being hovered.
+        self._hover_raw_frame: int | None = None
+        # Captured at press time, before _hover_matched_frame gets cleared
+        # below -- see mousePressEvent.
+        self._click_target_frame: int | None = None
         # Playhead-only counterpart of the frame_to_pair highlight above —
         # deliberately ignores hover, unlike _resolve_highlight_pair().
         self._last_playhead_pair: LatencyPair | None = None
@@ -328,8 +352,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._frame_to_pair = {}
         self._current_frame = None
         self._hover_matched_frame = None
+        self._hover_any_marker_frame = None
+        self._hover_raw_frame = None
+        self._click_target_frame = None
         self._sc_highlight.setData(x=[], y=[])
         self._connector_highlight.setData(x=[], y=[])
+        self._hover_line.setVisible(False)
         self._update_playhead_pair_signal()
         self.domain_changed.emit(0.0, -1.0)
         self.pairs_updated.emit()
@@ -424,18 +452,60 @@ class BrightnessGraphWidget(pg.PlotWidget):
         ))
 
     def _scene_x_to_data(self, pos) -> float:
-        scene_pos = self.mapToScene(pos.toPoint())
+        # Accepts QPoint or QPointF -- QGraphicsView.mapToScene only takes
+        # QPoint, so round explicitly rather than relying on QPointF.toPoint()
+        # (which QPoint itself doesn't have).
+        scene_pos = self.mapToScene(QPoint(round(pos.x()), round(pos.y())))
         return self._vb.mapSceneToView(scene_pos).x()
+
+    def _frame_at_pos(self, pos) -> int | None:
+        """Nearest in-domain frame under a widget-local pixel position, or
+        None if no data is loaded. Shared by the hover line's position and
+        mouseReleaseEvent's raw-click fallback."""
+        if self._range_hi <= self._range_lo:
+            return None
+        x = self._scene_x_to_data(pos)
+        return max(int(self._range_lo), min(int(self._range_hi), round(x)))
+
+    def _update_cursor_and_line(self) -> None:
+        """Single source of truth for 'what does hovering/pressing here look
+        like right now' -- every path that can change it (press, move,
+        release, leave) ends by calling this, so no transition can leave a
+        stale cursor or a line stuck visible."""
+        if self._pan_drag_active:
+            self._hover_line.setVisible(False)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif self._hover_any_marker_frame is not None:
+            # Line stays visible, snapped to the marker's frame rather than
+            # the raw mouse position -- with X-only hit-testing, two close
+            # markers' hover radii can overlap, and this is what actually
+            # tells you which one would be clicked, not just that "a" marker
+            # is in range.
+            self._hover_line.setPos(self._hover_any_marker_frame)
+            self._hover_line.setVisible(True)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        elif self._hover_raw_frame is not None:
+            self._hover_line.setPos(self._hover_raw_frame)
+            self._hover_line.setVisible(True)
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        else:
+            self._hover_line.setVisible(False)
+            self.unsetCursor()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._range_hi > self._range_lo:
+            # Captured before the hover-clear below, which would otherwise
+            # erase it before mouseReleaseEvent gets a chance to read it.
+            self._click_target_frame = self._hover_any_marker_frame
             self._pan_drag_active = True
             self._pan_drag_start_screen_x = event.position().x()
             self._pan_drag_start_range = (self._visible_start, self._visible_end)
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             if self._hover_matched_frame is not None:
                 self._hover_matched_frame = None
                 self._update_marker_highlight()
+            self._hover_any_marker_frame = None
+            self._hover_raw_frame = None
+            self._update_cursor_and_line()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -446,15 +516,24 @@ class BrightnessGraphWidget(pg.PlotWidget):
             self._apply_pan_drag(dx_px)
             event.accept()
             return
-        if self._range_hi > self._range_lo:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
         self._update_hover(event.position())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._pan_drag_active and event.button() == Qt.MouseButton.LeftButton:
             self._pan_drag_active = False
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            moved = abs(event.position().x() - self._pan_drag_start_screen_x) > _CLICK_DRAG_THRESHOLD_PX
+            # Resync hover/cursor/line to the release position now, rather
+            # than leaving it stale (frozen from before the drag started,
+            # since mouseMoveEvent skips _update_hover while dragging) until
+            # an incidental future move.
+            self._update_hover(event.position())
+            if not moved and self._orig_data is not None:
+                frame = self._click_target_frame
+                if frame is None:
+                    frame = self._hover_raw_frame
+                if frame is not None:
+                    self.frame_clicked.emit(frame)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -463,6 +542,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         if self._hover_matched_frame is not None:
             self._hover_matched_frame = None
             self._update_marker_highlight()
+        self._hover_any_marker_frame = None
+        self._hover_raw_frame = None
+        self._update_cursor_and_line()
         super().leaveEvent(event)
 
     def _update_hover(self, pos) -> None:
@@ -470,10 +552,18 @@ class BrightnessGraphWidget(pg.PlotWidget):
         if frame != self._hover_matched_frame:
             self._hover_matched_frame = frame
             self._update_marker_highlight()
+        self._hover_any_marker_frame = self._hit_test_any_marker(pos) if self._orig_data is not None else None
+        self._hover_raw_frame = self._frame_at_pos(pos)
+        self._update_cursor_and_line()
 
     def _hover_hit_test(self, pos) -> int | None:
         """pos: widget-local QPointF (mouseMoveEvent's event.position()).
-        Returns the nearest matched frame within a pixel hit radius, or None."""
+        Returns the nearest matched frame within a horizontal (X-only) pixel
+        hit radius, or None. X-only rather than 2D pixel distance because
+        the real cursor is hidden while the hover line is shown (see
+        _update_cursor_and_line) -- the user has no way to see or aim by
+        vertical position, so requiring it would make "am I on this marker"
+        unanswerable by eye."""
         if not self._frame_to_pair:
             return None
         best_frame, best_dist = None, _HOVER_HIT_R_PX
@@ -481,7 +571,32 @@ class BrightnessGraphWidget(pg.PlotWidget):
             data = self._orig_data if frame == pair.orig_frame else self._disp_data
             y = float(data[frame - self._in_point])
             widget_pt = self.mapFromScene(self._vb.mapViewToScene(QPointF(frame, y)))
-            dist = math.hypot(widget_pt.x() - pos.x(), widget_pt.y() - pos.y())
+            dist = abs(widget_pt.x() - pos.x())
+            if dist < best_dist:
+                best_frame, best_dist = frame, dist
+        return best_frame
+
+    def _hit_test_any_marker(self, pos) -> int | None:
+        """Like _hover_hit_test (also X-only, same reasoning), but considers
+        every visible transition marker (matched AND unmatched), not just
+        matched pairs. Kept independent of _hover_hit_test rather than
+        derived from it: deriving one from the other would change existing
+        ring-highlight hover behavior in the case where the nearest marker
+        overall is unmatched but a matched one is still within radius."""
+        show_r = self._polarity in ("both", "rising")
+        show_f = self._polarity in ("both", "falling")
+        candidates: list[tuple[int, np.ndarray]] = []
+        if show_r:
+            candidates += [(f, self._orig_data) for f in self._rise_orig_frames]
+            candidates += [(f, self._disp_data) for f in self._rise_disp_frames]
+        if show_f:
+            candidates += [(f, self._orig_data) for f in self._fall_orig_frames]
+            candidates += [(f, self._disp_data) for f in self._fall_disp_frames]
+        best_frame, best_dist = None, _HOVER_HIT_R_PX
+        for frame, data in candidates:
+            y = float(data[frame - self._in_point])
+            widget_pt = self.mapFromScene(self._vb.mapViewToScene(QPointF(frame, y)))
+            dist = abs(widget_pt.x() - pos.x())
             if dist < best_dist:
                 best_frame, best_dist = frame, dist
         return best_frame

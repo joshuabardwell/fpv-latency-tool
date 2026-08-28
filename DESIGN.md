@@ -155,6 +155,48 @@ boundary instead of overhanging past it — the playhead drifts off-center
 and reaches the graph's edge exactly when it reaches the last analyzed
 frame, with no dead space ever shown past the data.
 
+Left-click on the graph is disambiguated between click-to-seek and
+click-drag-pan at `mouseReleaseEvent` time: `_pan_drag_active` still
+activates unconditionally on press (as it always has, so panning itself is
+unchanged), but a release whose net horizontal displacement since press is
+below `_CLICK_DRAG_THRESHOLD_PX` is additionally treated as a click and
+emits `frame_clicked(frame)` — wired straight to `MainWindow.show_frame`,
+the same way `TimelineWidget.frame_changed` is, since the graph doesn't own
+"the current frame" itself. A click snaps to the nearest transition marker
+(matched *or* unmatched) within `_HOVER_HIT_R_PX` horizontal pixels if one
+was hovered at press time, else seeks to the raw clicked frame. Both marker
+hit-tests (`_hover_hit_test`, `_hit_test_any_marker`) compare X only, not 2D
+pixel distance — the real cursor is blanked while the hover line shows (see
+`_update_cursor_and_line` below), so the user has no way to see or aim by
+vertical position; requiring it would make "am I on this marker" a question
+they can't answer by eye. That hover state
+(`_hover_any_marker_frame`) is deliberately a *second*, broader hit-test
+kept independent of `_hover_matched_frame`/`_hover_hit_test` (which stays
+matched-pairs-only, feeding the existing ring highlight) — merging them
+would let a nearer unmatched marker silently steal the ring highlight away
+from a matched one still in-radius. It must also be captured at the very
+start of `mousePressEvent`, before the existing press-time hover-clear runs
+(there to stop the ring highlight sticking through a pan) — reading it at
+release time would always see it already cleared.
+
+`_update_cursor_and_line` is the single place that decides the cursor shape
+and the `_hover_line` (a `pg.InfiniteLine`, the same primitive once used for
+the old playhead before it was swapped for the current triangle+stalk —
+dashed and muted here so the two are never confused): dragging wins
+(closed-hand, line hidden), then hovering any marker (pointing-hand, line
+stays visible but snapped to the marker's frame rather than the raw mouse
+position — with X-only hit-testing two close markers' hover radii can
+overlap, and the line is what actually shows which one would be clicked),
+then a plain hover (the line at `_hover_raw_frame`, real cursor blanked so
+there's one indicator, not two overlapping ones), else neither. Every path
+that can change what's under the mouse — press, move, release, `leaveEvent`
+— ends by calling it, including `mouseReleaseEvent`, which resyncs hover
+state to the release position first: `mouseMoveEvent` skips hover updates
+entirely while
+`_pan_drag_active` (panning takes the whole event), so without that resync
+the cursor/line would stay frozen at wherever the mouse was *before* the
+drag started until an incidental future move.
+
 ## Detection algorithm and its limits
 
 Detection is a **per-frame derivative threshold**: a transition exists where a

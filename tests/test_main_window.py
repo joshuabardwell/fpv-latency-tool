@@ -878,3 +878,13 @@ class TestPlayheadRowHighlight:
 
         loaded._results_polarity = "falling"  # rising is no longer covered
         loaded._update_results_table()  # must not raise
+
+
+class TestGraphClickToSeek:
+    def test_frame_clicked_is_wired_to_show_frame(self, loaded, qtbot):
+        """Mirrors timeline.frame_changed's wiring to show_frame -- a click
+        on the graph should seek the same way scrubbing the timeline does."""
+        analyze(loaded, qtbot)
+        target = loaded.brightness_graph._rise_pairs[0].orig_frame
+        loaded.brightness_graph.frame_clicked.emit(target)
+        assert loaded.timeline.current_frame == target

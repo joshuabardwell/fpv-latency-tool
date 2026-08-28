@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 from pyqtgraph.graphicsItems.ScatterPlotItem import Symbols
 
 from core.view_range import MIN_ZOOM_FRAMES
@@ -156,6 +158,15 @@ class TestMarkerHighlight:
         g = load_graph_with_pairs(qtbot)
         pos = _marker_widget_pos(g, 5, "orig")
         assert g._hover_hit_test(pos) == 5
+
+    def test_hover_hit_test_is_x_only(self, qtbot):
+        """Regression: the real cursor is hidden while the hover line shows
+        (see _update_cursor_and_line), so the user can't see or aim by
+        vertical position -- hit-testing must not require it."""
+        g = load_graph_with_pairs(qtbot)
+        marker_pos = _marker_widget_pos(g, 5, "orig")
+        far_y_pos = QPoint(marker_pos.x(), marker_pos.y() + 1000)
+        assert g._hover_hit_test(far_y_pos) == 5
 
     def test_hover_hit_test_ignores_unmatched_marker(self, qtbot):
         g = load_graph_with_pairs(qtbot)
@@ -562,3 +573,220 @@ class TestPlayheadPairSignal:
         g.playhead_pair_changed.connect(lambda p: seen.append(p))
         g.clear_data()
         assert seen == [None]
+
+
+class TestHitTestAnyMarker:
+    def test_finds_matched_marker(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 5, "orig")
+        assert g._hit_test_any_marker(pos) == 5
+
+    def test_finds_unmatched_marker(self, qtbot):
+        """Regression: _hover_hit_test (matched-only) would return None here
+        -- _hit_test_any_marker must find unmatched markers too."""
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 15, "orig")
+        assert g._hover_hit_test(pos) is None
+        assert g._hit_test_any_marker(pos) == 15
+
+    def test_matched_marker_is_x_only(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        marker_pos = _marker_widget_pos(g, 5, "orig")
+        far_y_pos = QPoint(marker_pos.x(), marker_pos.y() + 1000)
+        assert g._hit_test_any_marker(far_y_pos) == 5
+
+    def test_unmatched_marker_is_x_only(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        marker_pos = _marker_widget_pos(g, 15, "orig")
+        far_y_pos = QPoint(marker_pos.x(), marker_pos.y() + 1000)
+        assert g._hit_test_any_marker(far_y_pos) == 15
+
+    def test_respects_live_polarity(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        g.set_polarity("falling")  # hides the rising marker @5
+        pos = _marker_widget_pos(g, 5, "orig")
+        assert g._hit_test_any_marker(pos) is None
+
+    def test_none_far_from_anything(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        assert g._hit_test_any_marker(QPoint(-1000, -1000)) is None
+
+
+def _mouse_event(event_type, pos, button=Qt.MouseButton.LeftButton, buttons=None):
+    """Directly-constructed QMouseEvent for calling BrightnessGraphWidget's
+    mousePressEvent/mouseMoveEvent/mouseReleaseEvent overrides as plain
+    method calls -- QGraphicsView routes real/qtbot-synthesized mouse events
+    through its viewport child widget, not the view itself, so simulating
+    via qtbot.mousePress/mouseMove/mouseRelease(g, ...) never reaches these
+    overrides. Every other event-adjacent test in this file (e.g.
+    test_leave_event_clears_hover) already calls the handler directly for
+    the same reason."""
+    if buttons is None:
+        buttons = button if event_type == QEvent.Type.MouseButtonPress else Qt.MouseButton.NoButton
+    return QMouseEvent(event_type, QPointF(pos), button, buttons, Qt.KeyboardModifier.NoModifier)
+
+
+def _press(g, pos):
+    g.mousePressEvent(_mouse_event(QEvent.Type.MouseButtonPress, pos))
+
+
+def _move(g, pos):
+    g.mouseMoveEvent(_mouse_event(QEvent.Type.MouseMove, pos, buttons=Qt.MouseButton.NoButton))
+
+
+def _release(g, pos):
+    g.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, pos))
+
+
+class TestClickToSeek:
+    def test_plain_click_emits_the_raw_clicked_frame(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")  # no marker near frame 3
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        _press(g, pos)
+        _release(g, pos)
+        assert seen == [3]
+
+    def test_click_snaps_to_hovered_marker_over_raw_click_position(self, qtbot):
+        """The click lands at frame 3's pixel, but a marker was hovered
+        (captured at press time) -- the snap must win over the raw position."""
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")
+        g._hover_any_marker_frame = 15  # simulate having hovered marker 15 just before pressing
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        _press(g, pos)
+        _release(g, pos)
+        assert seen == [15]
+
+    def test_hovering_then_clicking_a_marker_snaps_to_it(self, qtbot):
+        """End-to-end (real hover, not injected state): move onto a matched
+        marker, then click without moving further."""
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 5, "orig")
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        _move(g, pos)
+        _press(g, pos)
+        _release(g, pos)
+        assert seen == [5]
+
+    def test_drag_beyond_threshold_pans_and_does_not_emit(self, qtbot):
+        g = load_graph(qtbot, n=200, in_point=1000)
+        g.set_visible_range(1050, 1150)
+        before = (g._visible_start, g._visible_end)
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        start = QPoint(50, 50)
+        end = QPoint(80, 50)  # 30px net displacement, above the 4px threshold
+        _press(g, start)
+        _move(g, end)
+        _release(g, end)
+        assert seen == []
+        assert (g._visible_start, g._visible_end) != before
+
+    def test_movement_below_threshold_still_counts_as_a_click(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")
+        nearby = QPoint(pos.x() + 2, pos.y())  # 2px, below the 4px threshold
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        _press(g, pos)
+        _move(g, nearby)
+        _release(g, nearby)
+        assert len(seen) == 1
+
+    def test_no_click_without_data_loaded(self, qtbot):
+        g = make_graph(qtbot)
+        seen = []
+        g.frame_clicked.connect(lambda f: seen.append(f))
+        pos = QPoint(50, 50)
+        _press(g, pos)
+        _release(g, pos)
+        assert seen == []
+
+    def test_cursor_is_pointing_hand_over_any_marker(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 15, "orig")  # unmatched marker
+        _move(g, pos)
+        assert g.cursor().shape() == Qt.CursorShape.PointingHandCursor
+    # Cursor/line behavior away from markers is covered by TestHoverCursorAndLine.
+
+
+class TestHoverCursorAndLine:
+    def test_hovering_empty_area_shows_line_and_blank_cursor(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")  # no marker near frame 3
+        _move(g, pos)
+        assert g._hover_line.isVisible()
+        assert g._hover_line.value() == 3
+        assert g.cursor().shape() == Qt.CursorShape.BlankCursor
+
+    def test_hovering_matched_marker_shows_line_snapped_to_it(self, qtbot):
+        """The line stays visible and snaps to the marker's frame (not the
+        raw mouse position) -- this is what disambiguates two markers whose
+        X-only hover radii overlap."""
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 5, "orig")  # matched rising pair
+        _move(g, pos)
+        assert g._hover_line.isVisible()
+        assert g._hover_line.value() == 5
+        assert g.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+    def test_hovering_unmatched_marker_shows_line_snapped_to_it(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 15, "orig")  # unmatched
+        _move(g, pos)
+        assert g._hover_line.isVisible()
+        assert g._hover_line.value() == 15
+        assert g.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+    def test_press_hides_line_and_shows_closed_hand_immediately(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")
+        _move(g, pos)  # establish the line first
+        assert g._hover_line.isVisible()
+        _press(g, pos)
+        assert not g._hover_line.isVisible()
+        assert g.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+
+    def test_release_as_click_restores_line_for_release_position(self, qtbot):
+        """Regression: hover state must resync to the release position, not
+        stay frozen at whatever was hovered before the drag started (moves
+        are skipped while _pan_drag_active, so nothing updates it mid-drag)."""
+        g = load_graph_with_pairs(qtbot)
+        press_pos = _marker_widget_pos(g, 5, "orig")  # a matched marker
+        _move(g, press_pos)
+        _press(g, press_pos)
+        release_pos = _marker_widget_pos(g, 3, "orig")  # empty area, no marker
+        _release(g, release_pos)
+        assert g._hover_line.isVisible()
+        assert g._hover_line.value() == 3
+        assert g.cursor().shape() == Qt.CursorShape.BlankCursor
+
+    def test_release_as_click_shows_pointing_hand_if_released_on_a_marker(self, qtbot):
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 15, "orig")  # unmatched marker, press == release
+        _move(g, pos)
+        _press(g, pos)
+        _release(g, pos)
+        assert g._hover_line.isVisible()
+        assert g._hover_line.value() == 15
+        assert g.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+    def test_leave_event_hides_line_and_unsets_cursor(self, qtbot):
+        from PyQt6.QtCore import QEvent as _QEvent
+        g = load_graph_with_pairs(qtbot)
+        pos = _marker_widget_pos(g, 3, "orig")
+        _move(g, pos)
+        assert g._hover_line.isVisible()
+        g.leaveEvent(_QEvent(_QEvent.Type.Leave))
+        assert not g._hover_line.isVisible()
+        assert g.cursor().shape() != Qt.CursorShape.BlankCursor
+
+    def test_no_data_loaded_no_line_no_crash(self, qtbot):
+        g = make_graph(qtbot)
+        pos = QPoint(50, 50)
+        _move(g, pos)  # must not raise
+        assert not g._hover_line.isVisible()
