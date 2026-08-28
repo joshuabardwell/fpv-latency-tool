@@ -99,6 +99,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
         self.setMouseTracking(True)  # hover cursor for click-drag pan, without a button held
+        # A PlotWidget is a QGraphicsView, hence a QAbstractScrollArea, which
+        # handles the arrow keys itself to scroll its viewport and defaults to
+        # StrongFocus. Every interaction here is mouse-driven (wheel zoom, drag
+        # pan, click-to-seek), so it has no use for keyboard focus — and taking
+        # it on click swallowed MainWindow's frame/transition navigation keys.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         pi = self.getPlotItem()
         pi.hideAxis("bottom")
