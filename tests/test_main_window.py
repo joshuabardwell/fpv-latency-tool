@@ -16,7 +16,7 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
-from ui.main_window import MainWindow, _existing_file
+from ui.main_window import SUMMARY_METRICS, MainWindow, _existing_file
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -69,19 +69,26 @@ class TestAnalysisLifecycle:
         always be visible, showing a placeholder rather than being blank
         when nothing is loaded."""
         for model in (window._rise_summary_model, window._fall_summary_model):
-            assert [model.headerData(c, Qt.Orientation.Horizontal) for c in range(4)] == \
-                ["Mean", "Min", "Max", "Median"]
-            assert [model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+            assert [model.headerData(c, Qt.Orientation.Horizontal) for c in range(5)] == \
+                ["Metric", "Mean", "Min", "Max", "Median"]
+            assert model.rowCount() == len(SUMMARY_METRICS)
+            for row, (label, _) in enumerate(SUMMARY_METRICS):
+                assert model.item(row, 0).text() == label
+                assert [model.item(row, c).text() for c in range(1, 5)] == ["--.- ms"] * 4
 
     def test_summary_tables_populated_after_analysis(self, loaded, qtbot):
+        """The synthetic clip's transitions are instantaneous, so first = full =
+        anchor and all three metric rows report the same number as the tool did
+        before the metrics were split apart."""
         analyze(loaded, qtbot)
         fps = loaded.reader.fps_effective
         rise_pairs = loaded.brightness_graph.get_pairs_for("rising")
         fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
         rise_expected = f"{rise_pairs[0].delta_ms(fps):.1f} ms"
         fall_expected = f"{fall_pairs[0].delta_ms(fps):.1f} ms"
-        assert [loaded._rise_summary_model.item(0, c).text() for c in range(4)] == [rise_expected] * 4
-        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == [fall_expected] * 4
+        for row in range(len(SUMMARY_METRICS)):
+            assert [loaded._rise_summary_model.item(row, c).text() for c in range(1, 5)] == [rise_expected] * 4
+            assert [loaded._fall_summary_model.item(row, c).text() for c in range(1, 5)] == [fall_expected] * 4
 
     def test_analysis_finds_known_latency(self, loaded, qtbot):
         analyze(loaded, qtbot)
@@ -130,7 +137,8 @@ class TestAnalysisLifecycle:
         assert loaded.fall_results_container.isVisible()
         assert loaded._rise_results_model.rowCount() == 1
         assert loaded._fall_results_model.rowCount() == 0
-        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+        for row in range(len(SUMMARY_METRICS)):
+            assert [loaded._fall_summary_model.item(row, c).text() for c in range(1, 5)] == ["--.- ms"] * 4
 
     def test_results_panel_pinned_until_next_analyze(self, loaded, qtbot):
         """Regression: the results panel content must stay pinned to the
@@ -173,7 +181,8 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        expected = ["Exclude", "⚠", "Original Frame", "Display Frame",
+                    "First (ms)", "Avg (ms)", "Full (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
                 model.headerData(c, Qt.Orientation.Horizontal)
@@ -440,7 +449,7 @@ class TestCliCommand:
         args = SimpleNamespace(
             fps=None, direction=None,
             roi_original=(5000, 5000, 100, 100), roi_display=None,
-            min_delta=None, min_spacing=None, max_latency=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
             in_point=None, out_point=None,
         )
         loaded.apply_cli_args(args)
@@ -452,7 +461,7 @@ class TestCliCommand:
         args = SimpleNamespace(
             fps=None, direction=None,
             roi_original=None, roi_display=None,
-            min_delta=None, min_spacing=None, max_latency=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
             in_point=30, out_point=20,
         )
         loaded.apply_cli_args(args)
@@ -717,10 +726,12 @@ class TestExcludePairs:
         # Exclude the 6-frame outlier (row 2).
         loaded._rise_results_model.item(2, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
 
-        remaining_ms = [p.delta_ms(fps) for p in rise_pairs[:2]]
-        assert loaded._rise_summary_model.item(0, 0).text() == \
+        # Column 0 is the metric name now, so the stats start at column 1.
+        remaining_ms = [p.avg_delta_ms(fps) for p in rise_pairs[:2]]
+        avg_row = [m for m, _ in SUMMARY_METRICS].index("Average")
+        assert loaded._rise_summary_model.item(avg_row, 1).text() == \
             f"{sum(remaining_ms) / len(remaining_ms):.1f} ms"
-        assert loaded._rise_summary_model.item(0, 2).text() == f"{max(remaining_ms):.1f} ms"
+        assert loaded._rise_summary_model.item(avg_row, 3).text() == f"{max(remaining_ms):.1f} ms"
 
     def test_excluded_row_stays_visible_and_checked_in_normal_view(self, loaded):
         load_multi_pairs(loaded)
@@ -946,3 +957,178 @@ class TestGraphClickToSeek:
         target = loaded.brightness_graph._rise_pairs[0].orig_frame
         loaded.brightness_graph.frame_clicked.emit(target)
         assert loaded.timeline.current_frame == target
+
+
+def _drifting_arrays():
+    """Six flash cycles whose dark level climbs steadily, as it would if the
+    display slowly moved within an oversized ROI. Amplitude is constant, so
+    only the baseline check should fire."""
+    out = []
+    for c in range(6):
+        base = 20.0 + c * 30.0
+        out.append(np.full(8, base))
+        out.append(np.full(8, base + 200.0))
+    arr = np.concatenate(out).astype(np.float64)
+    return arr, arr.copy()
+
+
+def _per_pair_flagged_arrays():
+    """Each dark stretch tilts steadily upward instead of sitting flat, so the
+    region every transition measures its baseline from is not a level. That
+    trips the per-transition `unsteady-level` check.
+
+    Distinct from _drifting_arrays on purpose: under pure drift each transition
+    is still locally well-measured, so the SIGNAL is flagged but no individual
+    pair is. Here it is the individual measurements that are suspect. The tilt's
+    per-frame steps stay well under the auto delta, so detection still finds
+    exactly one transition per edge."""
+    out = []
+    for _ in range(4):
+        out.append(np.linspace(20.0, 100.0, 10))
+        out.append(np.full(10, 220.0))
+    arr = np.concatenate(out).astype(np.float64)
+    return arr, arr.copy()
+
+
+def _ramped_arrays():
+    """Transitions that take several frames, so the three metrics differ."""
+    def shape(delay):
+        d = np.full(60, 20.0)
+        for start in (10, 34):
+            d[start + delay : start + 4 + delay] = [70.0, 120.0, 170.0, 210.0]
+            d[start + 4 + delay : start + 12 + delay] = 220.0
+            d[start + 12 + delay : start + 16 + delay] = [170.0, 120.0, 70.0, 30.0]
+        return d
+    return shape(0), shape(3)
+
+
+class TestThreeMetricColumns:
+    def test_row_carries_all_three_metrics(self, loaded):
+        orig, disp = _ramped_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        fps = loaded.reader.fps_effective
+        pair = loaded.brightness_graph.get_pairs_for("rising", active="both")[0]
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row["First (ms)"] == f"{pair.first_delta_ms(fps):.1f}"
+        assert row["Avg (ms)"] == f"{pair.avg_delta_ms(fps):.1f}"
+        assert row["Full (ms)"] == f"{pair.full_delta_ms(fps):.1f}"
+
+    def test_instantaneous_clip_reports_the_same_number_three_times(self, loaded, qtbot):
+        """Compatibility check on the real synthetic clip: square-wave
+        transitions make first = full = anchor, so the tool still reports
+        exactly what it did before the metrics were split apart."""
+        analyze(loaded, qtbot)
+        fps = loaded.reader.fps_effective
+        pair = loaded.brightness_graph.get_pairs_for("rising")[0]
+        expected = f"{SYNTH_LATENCY / fps * 1000.0:.1f}"
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row["First (ms)"] == row["Avg (ms)"] == row["Full (ms)"] == expected
+
+
+class TestQualityBanner:
+    def test_hidden_for_a_clean_clip(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert not loaded.quality_label.isVisible()
+        assert loaded.quality_label.text() == ""
+
+    def test_names_the_offending_roi_on_a_drifting_signal(self, loaded):
+        orig, disp = _drifting_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+        text = loaded.quality_label.text()
+        assert "unstable baseline" in text.lower()
+        # Naming which ROI is at fault is the point; a bare count would leave
+        # the user guessing which of the two to re-draw.
+        assert "Original ROI" in text or "Display ROI" in text
+        assert loaded.quality_label.isVisible()
+
+    def test_warning_column_marks_flagged_rows_with_a_tooltip(self, loaded):
+        orig, disp = _per_pair_flagged_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        flagged = [i for i, p in enumerate(pairs) if not p.is_clean()]
+        assert flagged, "expected the drifting signal to flag at least one pair"
+        item = loaded._rise_results_model.item(flagged[0], loaded._warn_col)
+        assert item.text() == "⚠"
+        # Names the specific checks, not a generic "bad data".
+        assert item.toolTip().startswith("Measurement quality: ")
+        assert len(item.toolTip()) > len("Measurement quality: ")
+
+
+class TestExcludeFlagged:
+    def _load_flagged(self, win):
+        orig, disp = _per_pair_flagged_arrays()
+        win.brightness_graph.set_data(orig, disp, in_point=0)
+        win._results_polarity = "both"
+        win._update_results_table()
+        return win.brightness_graph.get_pairs_for("rising", active="both")
+
+    def test_button_disabled_when_nothing_is_flagged(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert not loaded.rise_exclude_flagged_btn.isEnabled()
+
+    def test_excludes_exactly_the_flagged_pairs(self, loaded):
+        pairs = self._load_flagged(loaded)
+        expected = {i for i, p in enumerate(pairs) if not p.is_clean()}
+        assert loaded.rise_exclude_flagged_btn.isEnabled()
+        loaded.rise_exclude_flagged_btn.click()
+        assert loaded._rise_excluded == expected
+
+    def test_uses_the_same_exclusion_machinery_as_the_checkboxes(self, loaded):
+        """No new mechanism: the graph muting, the Clear All button and the CSV
+        Excluded column all keep working because this just ticks the boxes."""
+        pairs = self._load_flagged(loaded)
+        flagged = {i for i, p in enumerate(pairs) if not p.is_clean()}
+        loaded.rise_exclude_flagged_btn.click()
+        for i in flagged:
+            item = loaded._rise_results_model.item(i, loaded._exclude_col)
+            assert item.checkState() == Qt.CheckState.Checked
+        assert loaded.rise_clear_excluded_btn.isEnabled()
+        loaded.rise_clear_excluded_btn.click()
+        assert loaded._rise_excluded == set()
+
+    def test_button_disables_once_everything_flagged_is_excluded(self, loaded):
+        self._load_flagged(loaded)
+        loaded.rise_exclude_flagged_btn.click()
+        assert not loaded.rise_exclude_flagged_btn.isEnabled()
+
+
+class TestEdgeSensitivityControl:
+    def test_disabled_until_a_file_is_loaded(self, window):
+        assert not window.edge_sigma_spin.isEnabled()
+
+    def test_enabled_after_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert loaded.edge_sigma_spin.isEnabled()
+
+    def test_changing_it_reaches_the_graph(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.edge_sigma_spin.setValue(7.5)
+        assert loaded.brightness_graph._sigma_k == pytest.approx(7.5)
+
+    def test_cli_value_is_applied(self, loaded):
+        args = SimpleNamespace(
+            fps=None, direction=None, roi_original=None, roi_display=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=5.5,
+            in_point=None, out_point=None,
+        )
+        loaded.apply_cli_args(args)
+        assert loaded.edge_sigma_spin.value() == pytest.approx(5.5)
+
+    def test_appears_in_the_generated_cli_command(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.edge_sigma_spin.setValue(4.5)
+        assert "--edge-sigma 4.5" in loaded._build_cli_command()

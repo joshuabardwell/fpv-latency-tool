@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.edges import DEFAULT_SIGMA_K
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
 from core.latency import default_max_latency_frames
@@ -89,6 +90,15 @@ class _ReleaseFocusOnCommit(QObject):
         return False  # let the widget handle the key normally as well
 
 
+# The three reported metrics, in the order they appear in the summary table.
+# Each entry is (row label, LatencyPair accessor taking fps and returning ms).
+SUMMARY_METRICS = [
+    ("First pixel", "first_delta_ms"),
+    ("Average", "avg_delta_ms"),
+    ("Full frame", "full_delta_ms"),
+]
+
+
 class ResultsPanel(NamedTuple):
     container: QWidget
     model: QStandardItemModel
@@ -97,6 +107,7 @@ class ResultsPanel(NamedTuple):
     summary_model: QStandardItemModel
     clear_all_btn: QPushButton
     show_excluded_btn: QPushButton
+    exclude_flagged_btn: QPushButton
 
 
 class ExcludedFilterProxy(QSortFilterProxyModel):
@@ -387,6 +398,21 @@ class MainWindow(QMainWindow):
         self.max_latency_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.max_latency_spin.setEnabled(False)
 
+        self.edge_sigma_label = QLabel("Edge Sensitivity:")
+        self.edge_sigma_spin = QDoubleSpinBox()
+        self.edge_sigma_spin.setRange(0.0, 20.0)
+        self.edge_sigma_spin.setSingleStep(0.5)
+        self.edge_sigma_spin.setDecimals(1)
+        self.edge_sigma_spin.setValue(DEFAULT_SIGMA_K)
+        self.edge_sigma_spin.setSuffix(" σ")
+        self.edge_sigma_spin.setToolTip(
+            "How far above the noise a signal must move to count as changing.\n"
+            "Higher = first-light later and fully-lit earlier (a narrower\n"
+            "measured transition). Has no effect on noise-free footage."
+        )
+        self.edge_sigma_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.edge_sigma_spin.setEnabled(False)
+
         self.max_latency_auto_btn = QPushButton("Auto")
         self.max_latency_auto_btn.setToolTip(
             "Sets Max Latency to 1/2 the measured period of the test signal."
@@ -401,6 +427,8 @@ class MainWindow(QMainWindow):
         detection_group_layout.addWidget(self.max_latency_label)
         detection_group_layout.addWidget(self.max_latency_spin)
         detection_group_layout.addWidget(self.max_latency_auto_btn)
+        detection_group_layout.addWidget(self.edge_sigma_label)
+        detection_group_layout.addWidget(self.edge_sigma_spin)
         detection_group_layout.addStretch()
         layout.addWidget(detection_group)
 
@@ -413,6 +441,15 @@ class MainWindow(QMainWindow):
         self.pairs_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pairs_label.setStyleSheet("color: #cccccc; font-size: 11px;")
         layout.addWidget(self.pairs_label)
+
+        # Data-quality banner. Hidden entirely when everything is clean, so its
+        # mere presence means something needs looking at.
+        self.quality_label = QLabel("")
+        self.quality_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.quality_label.setWordWrap(True)
+        self.quality_label.setStyleSheet("color: #e65ae6; font-size: 11px;")
+        self.quality_label.setVisible(False)
+        layout.addWidget(self.quality_label)
 
         # ── Timeline with in/out handles, zoom/pan bar above it ────────────
         # zoom_bar and timeline are stacked in the same QVBoxLayout cell
@@ -499,8 +536,16 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
-        result_columns = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        # Latency-in-frames is gone from the table: with three metrics it would
+        # triple the width for a number nobody reads once ms is present, and the
+        # average is a half-frame value that reads badly as an integer. All
+        # three still go to the CSV in frames.
+        result_columns = [
+            "Exclude", "⚠", "Original Frame", "Display Frame",
+            "First (ms)", "Avg (ms)", "Full (ms)",
+        ]
         self._exclude_col = result_columns.index("Exclude")
+        self._warn_col = result_columns.index("⚠")
         self._orig_frame_col = result_columns.index("Original Frame")
 
         rise_panel = self._build_results_table("Dark To Light Transitions", result_columns)
@@ -511,6 +556,7 @@ class MainWindow(QMainWindow):
         self._rise_summary_model = rise_panel.summary_model
         self.rise_clear_excluded_btn = rise_panel.clear_all_btn
         self.rise_show_excluded_btn = rise_panel.show_excluded_btn
+        self.rise_exclude_flagged_btn = rise_panel.exclude_flagged_btn
 
         fall_panel = self._build_results_table("Light To Dark Transitions", result_columns)
         self.fall_results_container = fall_panel.container
@@ -520,6 +566,7 @@ class MainWindow(QMainWindow):
         self._fall_summary_model = fall_panel.summary_model
         self.fall_clear_excluded_btn = fall_panel.clear_all_btn
         self.fall_show_excluded_btn = fall_panel.show_excluded_btn
+        self.fall_exclude_flagged_btn = fall_panel.exclude_flagged_btn
 
         right_layout.addWidget(self.rise_results_container, 1)
         right_layout.addWidget(self.fall_results_container, 1)
@@ -542,8 +589,9 @@ class MainWindow(QMainWindow):
         title_label.setStyleSheet("font-weight: bold; color: #cccccc;")
         container_layout.addWidget(title_label)
 
-        summary_model = QStandardItemModel(1, 4)
-        summary_model.setHorizontalHeaderLabels(["Mean", "Min", "Max", "Median"])
+        # One row per metric now, not one row total.
+        summary_model = QStandardItemModel(len(SUMMARY_METRICS), 5)
+        summary_model.setHorizontalHeaderLabels(["Metric", "Mean", "Min", "Max", "Median"])
         summary_table = QTableView()
         summary_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         summary_table.setModel(summary_model)
@@ -554,7 +602,8 @@ class MainWindow(QMainWindow):
         summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         summary_table.setFixedHeight(
-            summary_table.horizontalHeader().height() + summary_table.rowHeight(0)
+            summary_table.horizontalHeader().height()
+            + sum(summary_table.rowHeight(r) for r in range(len(SUMMARY_METRICS)))
             + 2 * summary_table.frameWidth() + 2
         )
         container_layout.addWidget(summary_table)
@@ -581,12 +630,20 @@ class MainWindow(QMainWindow):
         show_excluded_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         show_excluded_btn.setCheckable(True)
         show_excluded_btn.setEnabled(False)
+        exclude_flagged_btn = QPushButton("Exclude Flagged")
+        exclude_flagged_btn.setToolTip(
+            "Tick Exclude on every pair carrying a measurement-quality warning."
+        )
+        exclude_flagged_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        exclude_flagged_btn.setEnabled(False)
         button_row.addWidget(clear_all_btn)
         button_row.addWidget(show_excluded_btn)
+        button_row.addWidget(exclude_flagged_btn)
         button_row.addStretch(1)
         container_layout.addLayout(button_row)
 
-        return ResultsPanel(container, model, table, proxy, summary_model, clear_all_btn, show_excluded_btn)
+        return ResultsPanel(container, model, table, proxy, summary_model,
+                            clear_all_btn, show_excluded_btn, exclude_flagged_btn)
 
     def _wire_events(self) -> None:
         self.open_button.clicked.connect(self.on_open_file)
@@ -632,9 +689,13 @@ class MainWindow(QMainWindow):
         self.polarity_combo.currentIndexChanged.connect(self._on_polarity_changed)
         self.delta_spin.valueChanged.connect(self._on_delta_spin_changed)
         self.spacing_spin.valueChanged.connect(lambda v: self.brightness_graph.set_min_spacing(v))
+        # No auto-computed default, so this needs none of the one-shot CLI
+        # override dance that Min Delta and Max Latency require.
+        self.edge_sigma_spin.valueChanged.connect(lambda v: self.brightness_graph.set_sigma_k(v))
         self.max_latency_spin.valueChanged.connect(self._on_max_latency_spin_changed)
         self.max_latency_auto_btn.clicked.connect(self._on_max_latency_auto_clicked)
         self.brightness_graph.pairs_updated.connect(self._update_pairs_label)
+        self.brightness_graph.pairs_updated.connect(self._update_quality_label)
         self.brightness_graph.pairs_updated.connect(self._update_export_csv_enabled)
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
         self.brightness_graph.pairs_updated.connect(self._on_pairs_rebuilt)
@@ -650,6 +711,8 @@ class MainWindow(QMainWindow):
             lambda item: self._on_exclude_toggled("falling", item))
         self.rise_clear_excluded_btn.clicked.connect(lambda: self._on_clear_excluded("rising"))
         self.fall_clear_excluded_btn.clicked.connect(lambda: self._on_clear_excluded("falling"))
+        self.rise_exclude_flagged_btn.clicked.connect(lambda: self._on_exclude_flagged("rising"))
+        self.fall_exclude_flagged_btn.clicked.connect(lambda: self._on_exclude_flagged("falling"))
         self.rise_show_excluded_btn.toggled.connect(
             lambda checked: self._on_toggle_show_excluded("rising", checked))
         self.fall_show_excluded_btn.toggled.connect(
@@ -1107,6 +1170,7 @@ class MainWindow(QMainWindow):
         self.brightness_graph.set_max_latency(effective_max_latency)
 
         self.spacing_spin.setEnabled(True)
+        self.edge_sigma_spin.setEnabled(True)
         self.max_latency_spin.setEnabled(True)
         self.max_latency_auto_btn.setEnabled(True)
         self.prev_trans_button.setEnabled(True)
@@ -1161,18 +1225,26 @@ class MainWindow(QMainWindow):
         self._update_results_table()
 
     def _sync_exclude_controls(self, direction: str) -> None:
+        rise_pairs, fall_pairs, _ = self._current_direction_pairs()
         if direction == "rising":
             excluded, show_only = self._rise_excluded, self._rise_show_excluded_only
             clear_btn, show_btn = self.rise_clear_excluded_btn, self.rise_show_excluded_btn
+            flagged_btn, pairs = self.rise_exclude_flagged_btn, rise_pairs
         else:
             excluded, show_only = self._fall_excluded, self._fall_show_excluded_only
             clear_btn, show_btn = self.fall_clear_excluded_btn, self.fall_show_excluded_btn
+            flagged_btn, pairs = self.fall_exclude_flagged_btn, fall_pairs
         has_excluded = bool(excluded)
         clear_btn.setEnabled(has_excluded)
         show_btn.setEnabled(has_excluded)
         show_btn.blockSignals(True)
         show_btn.setChecked(show_only)
         show_btn.blockSignals(False)
+        # Enabled by there being something left to exclude, not by there being
+        # something already excluded — unlike the two buttons above.
+        flagged_btn.setEnabled(
+            any(i not in excluded and not p.is_clean() for i, p in enumerate(pairs))
+        )
 
     def _on_exclude_toggled(self, direction: str, item: QStandardItem) -> None:
         if item.column() != self._exclude_col:
@@ -1297,27 +1369,43 @@ class MainWindow(QMainWindow):
             exclude_item.setCheckState(
                 Qt.CheckState.Checked if idx in excluded else Qt.CheckState.Unchecked)
             exclude_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            warnings = p.quality_warnings()
+            warn_item = QStandardItem("⚠" if warnings else "")
+            warn_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if warnings:
+                # Name the checks that failed, not a generic "bad data" — the
+                # point is to say what to go and fix.
+                warn_item.setToolTip(
+                    "Measurement quality: " + ", ".join(warnings)
+                )
+                warn_item.setForeground(QBrush(QColor(230, 90, 230)))
+
             model.appendRow([
                 exclude_item,
+                warn_item,
                 QStandardItem(str(p.orig_frame)),
                 QStandardItem(str(p.disp_frame)),
-                QStandardItem(str(p.delta_frames())),
-                QStandardItem(f"{p.delta_ms(fps):.1f}"),
+                QStandardItem(f"{p.first_delta_ms(fps):.1f}"),
+                QStandardItem(f"{p.avg_delta_ms(fps):.1f}"),
+                QStandardItem(f"{p.full_delta_ms(fps):.1f}"),
             ])
 
     def _populate_summary_model(self, model: QStandardItemModel, pairs: list, fps: float) -> None:
-        if not pairs:
-            values = ["--.- ms"] * 4
-        else:
-            latencies = [p.delta_ms(fps) for p in pairs]
-            values = [
-                f"{sum(latencies) / len(latencies):.1f} ms",
-                f"{min(latencies):.1f} ms",
-                f"{max(latencies):.1f} ms",
-                f"{statistics.median(latencies):.1f} ms",
-            ]
-        for col, text in enumerate(values):
-            model.setItem(0, col, QStandardItem(text))
+        for row, (label, accessor) in enumerate(SUMMARY_METRICS):
+            model.setItem(row, 0, QStandardItem(label))
+            if not pairs:
+                values = ["--.- ms"] * 4
+            else:
+                latencies = [getattr(p, accessor)(fps) for p in pairs]
+                values = [
+                    f"{sum(latencies) / len(latencies):.1f} ms",
+                    f"{min(latencies):.1f} ms",
+                    f"{max(latencies):.1f} ms",
+                    f"{statistics.median(latencies):.1f} ms",
+                ]
+            for col, text in enumerate(values, start=1):
+                model.setItem(row, col, QStandardItem(text))
 
     def _on_export_csv(self) -> None:
         rise_pairs, fall_pairs, fps = self._current_direction_pairs()
@@ -1338,6 +1426,54 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         write_pairs_csv(path, pairs, fps, excluded_flags=flags)
+
+    def _update_quality_label(self) -> None:
+        """Surface the whole-signal verdict and the flagged-pair count. Names
+        which ROI is at fault and suggests the likely cause — a bare warning
+        count would leave the user guessing which of the two to re-draw."""
+        pairs = self.brightness_graph.get_pairs()
+        orig_quality, disp_quality = self.brightness_graph.get_signal_quality()
+        flagged = sum(1 for p in pairs if not p.is_clean())
+
+        problems: list[str] = []
+        for name, quality in (("Original", orig_quality), ("Display", disp_quality)):
+            if quality.unstable_baseline:
+                problems.append(f"unstable baseline on the {name} ROI")
+            if quality.inconsistent_amplitude:
+                problems.append(f"inconsistent contrast on the {name} ROI")
+
+        if not problems and not flagged:
+            self.quality_label.setVisible(False)
+            self.quality_label.setText("")
+            return
+
+        bits = []
+        if problems:
+            # Upper-case the first letter only; str.capitalize() would lowercase
+            # the rest and turn "Original ROI" into "original roi".
+            sentence = "; ".join(problems)
+            bits.append("⚠ " + sentence[:1].upper() + sentence[1:] + ".")
+        if flagged:
+            bits.append(f"{flagged} of {len(pairs)} pairs flagged.")
+        if problems:
+            bits.append(
+                "Check that each ROI stays inside its screen for the whole clip."
+            )
+        self.quality_label.setText(" ".join(bits))
+        self.quality_label.setVisible(True)
+
+    def _on_exclude_flagged(self, direction: str) -> None:
+        """Tick the Exclude box on every flagged pair. Deliberately a button
+        rather than automatic: a flag is a prompt to look, not a verdict, and
+        silently dropping data from a measurement would be worse than reporting
+        it with a warning attached."""
+        rise_pairs, fall_pairs, _ = self._current_direction_pairs()
+        pairs = rise_pairs if direction == "rising" else fall_pairs
+        excluded = self._rise_excluded if direction == "rising" else self._fall_excluded
+        excluded.update(i for i, p in enumerate(pairs) if not p.is_clean())
+        # Same repopulate path the Clear All button uses; it re-applies the
+        # exclusion sets to the graph and both summaries on its own.
+        self._update_results_table()
 
     def _update_pairs_label(self) -> None:
         pairs = self.brightness_graph.get_pairs()
@@ -1404,6 +1540,8 @@ class MainWindow(QMainWindow):
             self.delta_spin.setValue(args.min_delta)
         if args.min_spacing is not None:
             self.spacing_spin.setValue(args.min_spacing)
+        if args.edge_sigma is not None:
+            self.edge_sigma_spin.setValue(args.edge_sigma)
         if args.max_latency is not None:
             self.max_latency_spin.setValue(args.max_latency)
         if args.in_point is not None:
@@ -1443,6 +1581,7 @@ class MainWindow(QMainWindow):
         if self.delta_spin.isEnabled() or self._delta_user_set:
             parts.append(f"--min-delta {self.delta_spin.value()}")
         parts.append(f"--min-spacing {self.spacing_spin.value()}")
+        parts.append(f"--edge-sigma {self.edge_sigma_spin.value():g}")
         parts.append(f"--max-latency {self.max_latency_spin.value()}")
         parts.append(f"--in-point {self.timeline.in_point}")
         parts.append(f"--out-point {self.timeline.out_point}")
@@ -1574,6 +1713,7 @@ def main() -> None:
     parser.add_argument("--direction",    choices=["both", "rising", "falling"])
     parser.add_argument("--min-delta",    type=int,          metavar="BRIGHTNESS")
     parser.add_argument("--min-spacing",  type=int,          metavar="FRAMES")
+    parser.add_argument("--edge-sigma",   type=float,        metavar="SIGMAS")
     parser.add_argument("--max-latency",  type=int,          metavar="FRAMES")
     parser.add_argument("--in-point",     type=int,          metavar="FRAME")
     parser.add_argument("--out-point",    type=int,          metavar="FRAME")
