@@ -26,6 +26,7 @@ Findings from a fourth audit round, re-verified against this branch before fixin
 - `--out-point`/`--in-point` CLI args that conflict now warn instead of silently clamping to a different range than requested.
 - Startup window now sets its geometry explicitly from the screen's available area instead of relying on `showMaximized()`'s automatic calculation, fixing a multi-monitor Windows quirk where the window reported itself maximized without actually filling the screen.
 - Results table no longer steals keyboard focus on click, which was swallowing arrow-key/Home/End/I/O navigation shortcuts.
+- Left column (video preview, controls, brightness graph, scrub bar) now scrolls instead of forcing the main window taller than the screen when its content's minimum height grows past the available space (e.g. once the FPS-verification row and "Analysis complete" status appear after Analyze) — previously this pushed the window behind the taskbar and could leave Detection Parameters overlapping the video preview after a subsequent Restore/Maximize.
 
 ### Changed
 - Frame/Transition/Unmatched navigation buttons now use a uniform `<< Word` / `Word >>` label convention and are stacked vertically beside the timeline (Transition nearest the graph, Frame nearest the timeline) instead of laid out in a single horizontal row, shrinking the scrub bar's width.

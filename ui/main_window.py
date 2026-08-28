@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -45,6 +46,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableView,
@@ -476,7 +478,15 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Frame: -- / --    Time: -- s")
         layout.addWidget(self.status_label)
 
-        splitter.addWidget(left_widget)
+        # Wrapped in a scroll area so that when the column's minimum height
+        # (video preview + fixed-height widgets stacked with no give)
+        # exceeds the available window height, the column scrolls instead
+        # of forcing the top-level window to grow past the screen/taskbar.
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setWidget(left_widget)
+        splitter.addWidget(left_scroll)
 
         # ── Results panel (right side) ────────────────────────────────────
         right_widget = QWidget()
