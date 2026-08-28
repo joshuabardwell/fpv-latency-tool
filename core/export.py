@@ -13,8 +13,8 @@ from core.latency import LatencyPair
 # disagrees with the UI is worse than a renamed one.
 CSV_COLUMNS = [
     "#",
-    "Original Frame",
-    "Display Frame",
+    "Original 1st Pixel",
+    "Display 1st Pixel",
     "Direction",
     "First (frames)",
     "First (ms)",
@@ -33,8 +33,11 @@ def pairs_to_rows(
     rows = [
         {
             "#": i,
-            "Original Frame": p.orig_frame,
-            "Display Frame": p.disp_frame,
+            # First-pixel, matching the results table. The anchor these used
+            # to carry is an internal matching detail, and having the CSV and
+            # the table disagree about "the frame" would be a trap.
+            "Original 1st Pixel": p.orig_first_frame(),
+            "Display 1st Pixel": p.disp_first_frame(),
             "Direction": "Dark→Light" if p.polarity == "rising" else "Light→Dark",
             "First (frames)": round(p.first_delta_frames(), 2),
             "First (ms)": round(p.first_delta_ms(fps), 2),

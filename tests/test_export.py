@@ -13,7 +13,7 @@ from core.latency import LatencyPair
 # delta and report the same number — which is also exactly what an
 # instantaneous transition produces.
 FORMAT_GOLDEN = (
-    "#,Original Frame,Display Frame,Direction,"
+    "#,Original 1st Pixel,Display 1st Pixel,Direction,"
     "First (frames),First (ms),Avg (frames),Avg (ms),Full (frames),Full (ms),Warnings\n"
     "1,10,13,Dark→Light,3.0,100.0,3.0,100.0,3.0,100.0,\n"
     "2,25,28,Light→Dark,3.0,100.0,3.0,100.0,3.0,100.0,\n"
@@ -58,6 +58,8 @@ class TestCsvExport:
         fields = path.read_text(encoding="utf-8").splitlines()[1].split(",")
         header = FORMAT_GOLDEN.splitlines()[0].split(",")
         row = dict(zip(header, fields))
+        assert row["Original 1st Pixel"] == "8"   # first-pixel, not the anchor 10
+        assert row["Display 1st Pixel"] == "20"   # first-pixel, not the anchor 22
         assert row["First (frames)"] == "12.0"
         assert row["Avg (frames)"] == "14.0"
         assert row["Full (frames)"] == "16.0"

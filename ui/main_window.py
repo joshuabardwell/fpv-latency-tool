@@ -90,6 +90,11 @@ class _ReleaseFocusOnCommit(QObject):
         return False  # let the widget handle the key normally as well
 
 
+# Two-line headers: the frame columns report first-pixel, not the internal
+# steepest-step anchor, and "Original Frame" gave no hint which.
+COL_ORIG_FIRST = "Original\n1st Pixel"
+COL_DISP_FIRST = "Display\n1st Pixel"
+
 # The three reported metrics, in the order they appear in the summary table.
 # Each entry is (row label, LatencyPair accessor taking fps and returning ms).
 SUMMARY_METRICS = [
@@ -541,12 +546,12 @@ class MainWindow(QMainWindow):
         # average is a half-frame value that reads badly as an integer. All
         # three still go to the CSV in frames.
         result_columns = [
-            "Exclude", "⚠", "Original Frame", "Display Frame",
+            "Exclude", "⚠", COL_ORIG_FIRST, COL_DISP_FIRST,
             "First (ms)", "Avg (ms)", "Full (ms)",
         ]
         self._exclude_col = result_columns.index("Exclude")
         self._warn_col = result_columns.index("⚠")
-        self._orig_frame_col = result_columns.index("Original Frame")
+        self._orig_frame_col = result_columns.index(COL_ORIG_FIRST)
 
         rise_panel = self._build_results_table("Dark To Light Transitions", result_columns)
         self.rise_results_container = rise_panel.container
@@ -619,6 +624,10 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Off, or Qt bolds whichever header holds the current item — making a
+        # populated panel's headers bold and an empty panel's plain, which
+        # reads as a deliberate distinction and isn't one.
+        table.horizontalHeader().setHighlightSections(False)
         table.verticalHeader().setVisible(False)
         container_layout.addWidget(table)
 
@@ -1387,8 +1396,8 @@ class MainWindow(QMainWindow):
             model.appendRow([
                 exclude_item,
                 warn_item,
-                QStandardItem(str(p.orig_frame)),
-                QStandardItem(str(p.disp_frame)),
+                QStandardItem(str(p.orig_first_frame())),
+                QStandardItem(str(p.disp_first_frame())),
                 QStandardItem(f"{p.first_delta_ms(fps):.1f}"),
                 QStandardItem(f"{p.avg_delta_ms(fps):.1f}"),
                 QStandardItem(f"{p.full_delta_ms(fps):.1f}"),

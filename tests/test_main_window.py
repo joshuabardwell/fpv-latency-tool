@@ -16,7 +16,8 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
-from ui.main_window import SUMMARY_METRICS, MainWindow, _existing_file
+from ui.main_window import (COL_DISP_FIRST, COL_ORIG_FIRST, SUMMARY_METRICS,
+                            MainWindow, _existing_file)
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -181,7 +182,7 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Exclude", "⚠", "Original Frame", "Display Frame",
+        expected = ["Exclude", "⚠", "Original\n1st Pixel", "Display\n1st Pixel",
                     "First (ms)", "Avg (ms)", "Full (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
@@ -990,6 +991,22 @@ def _per_pair_flagged_arrays():
     return arr, arr.copy()
 
 
+def _asymmetric_ramp_arrays():
+    """Mirrors the real LED: one partially-lit frame, then a hard step. The
+    steepest single-frame change is the second one, so the anchor lands a frame
+    AFTER first-light — on the real clip 2.7 -> 84.2 -> 217.4 gave anchor 1153
+    with first-light at 1152. A symmetric ramp cannot show this, because its
+    steepest step is its first."""
+    def shape(delay):
+        d = np.full(40, 20.0)
+        d[10 + delay] = 84.0
+        d[11 + delay : 26 + delay] = 220.0
+        d[26 + delay] = 84.0
+        d[27 + delay :] = 20.0
+        return d
+    return shape(0), shape(3)
+
+
 def _ramped_arrays():
     """Transitions that take several frames, so the three metrics differ."""
     def shape(delay):
@@ -1018,6 +1035,35 @@ class TestThreeMetricColumns:
         assert row["First (ms)"] == f"{pair.first_delta_ms(fps):.1f}"
         assert row["Avg (ms)"] == f"{pair.avg_delta_ms(fps):.1f}"
         assert row["Full (ms)"] == f"{pair.full_delta_ms(fps):.1f}"
+
+    def test_frame_columns_hold_first_pixel_not_the_anchor(self, loaded):
+        """The frame columns used to show the steepest-step anchor, which is an
+        internal matching detail — not drawn on the graph, not one of the three
+        reported metrics, and not where Up/Down navigation lands. On real
+        footage that made the column read 1153 where first-pixel was 1152."""
+        orig, disp = _asymmetric_ramp_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        pair = loaded.brightness_graph.get_pairs_for("rising", active="both")[0]
+        assert pair.orig_first_frame() != pair.orig_frame,             "fixture must ramp, or this asserts nothing"
+
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row[COL_ORIG_FIRST] == str(pair.orig_first_frame())
+        assert row[COL_DISP_FIRST] == str(pair.disp_first_frame())
+
+    def test_headers_do_not_bold_only_the_populated_panel(self, loaded, qtbot):
+        """Qt bolds the header section holding the current item, so a panel
+        with rows rendered bold while an empty one didn't — reading as a
+        deliberate distinction that was never intended."""
+        analyze(loaded, qtbot)
+        for name in ("rise_results_table", "fall_results_table"):
+            header = getattr(loaded, name).horizontalHeader()
+            assert not header.highlightSections()
 
     def test_instantaneous_clip_reports_the_same_number_three_times(self, loaded, qtbot):
         """Compatibility check on the real synthetic clip: square-wave

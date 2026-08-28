@@ -59,6 +59,20 @@ class LatencyPair:
     def avg_delta_ms(self, fps: float) -> float:
         return self.avg_delta_frames() / fps * 1000.0
 
+    def orig_first_frame(self) -> int:
+        """The frame the source first shows any light — the frame the UI
+        reports and seeks to. Falls back to the anchor when this end could not
+        be characterized, matching the delta accessors above.
+
+        The anchor (`orig_frame`) is the steepest single-frame step and is an
+        internal matching detail: it is not drawn on the graph and is not one
+        of the three reported metrics."""
+        return self.orig_edge.first_frame if self.orig_edge else self.orig_frame
+
+    def disp_first_frame(self) -> int:
+        """Display counterpart of orig_first_frame."""
+        return self.disp_edge.first_frame if self.disp_edge else self.disp_frame
+
     # --- quality ----------------------------------------------------------
 
     def quality_warnings(self) -> tuple[str, ...]:
