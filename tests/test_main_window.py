@@ -14,10 +14,13 @@ import pytest
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
+from core.edges import (TransitionEdge, W_AMBIGUOUS_EDGE, W_LOW_SNR,
+                        W_UNSTEADY_LEVEL)
+from core.latency import LatencyPair
 from core.roi import ROI
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
 from ui.main_window import (COL_DISP_FIRST, COL_ORIG_FIRST, SUMMARY_METRICS,
-                            MainWindow, _existing_file)
+                            WARNING_TEXT, MainWindow, _existing_file)
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -1125,9 +1128,10 @@ class TestQualityBanner:
 
         assert "⚠" in text
         assert "pairs flagged" in text
-        # Names the checks that failed, so there is something to act on.
-        assert any(w in text for w in ("unsteady-level", "low-snr",
-                                       "ambiguous-edge", "slow-ramp"))
+        # Readable labels, not the raw slugs, and lower-cased mid-sentence.
+        assert not any(slug in text for slug in WARNING_TEXT)
+        assert any(label.lower() in text
+                   for label, _ in WARNING_TEXT.values())
 
     def test_roi_framing_is_only_suggested_for_low_snr(self, loaded):
         """low-snr is the one flag where framing genuinely is implicated: too
@@ -1150,9 +1154,41 @@ class TestQualityBanner:
         assert flagged, "expected the drifting signal to flag at least one pair"
         item = loaded._rise_results_model.item(flagged[0], loaded._warn_col)
         assert item.text() == "⚠"
-        # Names the specific checks, not a generic "bad data".
-        assert item.toolTip().startswith("Measurement quality: ")
-        assert len(item.toolTip()) > len("Measurement quality: ")
+
+        # Explains what was seen rather than naming the check that fired:
+        # "unsteady-level" tells a reader of the code what happened and tells a
+        # user of the app nothing.
+        tip = item.toolTip()
+        assert "unsteady-level" not in tip
+        label, explanation = WARNING_TEXT[W_UNSTEADY_LEVEL]
+        assert tip.startswith(label)
+        assert explanation in tip
+
+    def test_tooltip_lists_every_flag_on_its_own_line(self, loaded):
+        pair = LatencyPair(
+            10, 13, "rising",
+            orig_edge=TransitionEdge(
+                anchor_frame=10, first_frame=10, full_frame=10,
+                baseline=20.0, plateau=220.0, polarity="rising",
+                snr=1.0, crossings=3,
+                warnings=(W_LOW_SNR, W_AMBIGUOUS_EDGE)),
+        )
+        model = loaded._rise_results_model
+        loaded._populate_results_model(model, [pair], 240.0, set())
+        tip = model.item(0, loaded._warn_col).toolTip()
+        assert len(tip.splitlines()) == 2
+        assert tip.splitlines()[0].startswith(WARNING_TEXT[W_LOW_SNR][0])
+        assert tip.splitlines()[1].startswith(WARNING_TEXT[W_AMBIGUOUS_EDGE][0])
+
+    def test_every_warning_slug_has_human_text(self):
+        """A slug with no entry falls through to the UI raw. Keyed by the
+        imported constants so a rename breaks the import, but a NEW slug added
+        to core.edges would still slip through — this catches that."""
+        import core.edges as edges
+
+        slugs = {v for k, v in vars(edges).items()
+                 if k.startswith("W_") and isinstance(v, str)}
+        assert slugs == set(WARNING_TEXT), "a warning slug has no human text"
 
 
 class TestExcludeFlagged:

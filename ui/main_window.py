@@ -54,7 +54,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.edges import DEFAULT_SIGMA_K, W_LOW_SNR
+from core.edges import (
+    DEFAULT_SIGMA_K,
+    W_AMBIGUOUS_EDGE,
+    W_LOW_SNR,
+    W_SLOW_RAMP,
+    W_UNSTEADY_LEVEL,
+)
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
 from core.latency import default_max_latency_frames
@@ -88,6 +94,59 @@ class _ReleaseFocusOnCommit(QObject):
                 event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)):
             QTimer.singleShot(0, _release_spinbox_focus)
         return False  # let the widget handle the key normally as well
+
+
+# Human-readable rendering of core.edges' warning slugs: a short label for the
+# banner, and a sentence saying what was actually seen and why it matters for
+# trusting the number. The slugs themselves name the *check*, which tells a
+# reader of this code what fired but tells a user of the app nothing.
+#
+# Keyed by the imported constants so renaming a slug breaks loudly here instead
+# of silently falling back to raw text. Only the UI translates: the CSV keeps
+# the slugs, which are greppable and stable in a way a sentence is not.
+WARNING_TEXT = {
+    W_UNSTEADY_LEVEL: (
+        "Drifting levels",
+        "the brightness either side of this transition was still drifting "
+        "rather than holding steady, so the levels this measurement is "
+        "compared against are approximate. Common when the device under test "
+        "has auto-exposure.",
+    ),
+    W_LOW_SNR: (
+        "Low contrast",
+        "the brightness step is small next to the image noise, so the exact "
+        "first-lit and fully-lit frames are uncertain. Often means the ROI "
+        "holds too little of its screen.",
+    ),
+    W_AMBIGUOUS_EDGE: (
+        "Ambiguous start",
+        "brightness crossed the first-light threshold more than once, so "
+        "there is more than one candidate for the frame light first appeared. "
+        "Usually movement during the transition.",
+    ),
+    W_SLOW_RAMP: (
+        "Never settles",
+        "the brightness is still changing when the next transition arrives, "
+        "so the fully-lit frame is approximate rather than measured.",
+    ),
+}
+
+
+def _warning_label(slug: str) -> str:
+    """Short label for the banner. An unrecognised slug falls through unchanged
+    rather than being dropped — a warning the user can't parse still beats a
+    warning that silently disappears."""
+    entry = WARNING_TEXT.get(slug)
+    return entry[0] if entry else slug
+
+
+def _warning_tooltip(warnings) -> str:
+    """One line per flag: label, then what was seen and why it matters."""
+    lines = []
+    for slug in warnings:
+        entry = WARNING_TEXT.get(slug)
+        lines.append(f"{entry[0]} — {entry[1]}" if entry else slug)
+    return "\n".join(lines)
 
 
 # Two-line headers: the frame columns report first-pixel, not the internal
@@ -1386,11 +1445,9 @@ class MainWindow(QMainWindow):
             warn_item = QStandardItem("⚠" if warnings else "")
             warn_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if warnings:
-                # Name the checks that failed, not a generic "bad data" — the
-                # point is to say what to go and fix.
-                warn_item.setToolTip(
-                    "Measurement quality: " + ", ".join(warnings)
-                )
+                # Explain what was seen, not which check fired — "unsteady-level"
+                # names the code, not the problem.
+                warn_item.setToolTip(_warning_tooltip(warnings))
                 warn_item.setForeground(QBrush(QColor(230, 90, 230)))
 
             model.appendRow([
@@ -1478,7 +1535,11 @@ class MainWindow(QMainWindow):
 
         bits: list[str] = []
         if flagged:
-            checks = sorted({w for p in flagged for w in p.quality_warnings()})
+            # Labels, not slugs, and lower-cased because they sit mid-sentence.
+            checks = sorted(
+                {_warning_label(w).lower()
+                 for p in flagged for w in p.quality_warnings()}
+            )
             bits.append(
                 f"⚠ {len(flagged)} of {len(pairs)} pairs flagged: "
                 + ", ".join(checks) + "."
@@ -1498,7 +1559,7 @@ class MainWindow(QMainWindow):
         # the screen inside the box leaves the step buried in the noise.
         if any(W_LOW_SNR in p.quality_warnings() for p in flagged):
             bits.append(
-                "Low SNR can mean an ROI holds too little of its screen."
+                "Low contrast can mean an ROI holds too little of its screen."
             )
 
         self.quality_label.setText(" ".join(bits))
