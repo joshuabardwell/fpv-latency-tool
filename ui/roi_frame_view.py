@@ -34,7 +34,12 @@ class RoiFrameView(QLabel):
         sp.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
         self.setSizePolicy(sp)
         self.setStyleSheet("background-color: #222; color: #888;")
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # NoFocus: ROI drag-drawing only needs mouse capture, not keyboard
+        # focus. ClickFocus here let a click on the video grab focus, and since
+        # this widget doesn't handle keys itself, the ignored keypress
+        # propagated to left_scroll (the QAbstractScrollArea wrapping the left
+        # column), which swallows arrow keys to scroll its viewport.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._base_pixmap: QPixmap | None = None
         self._orig_w = 1

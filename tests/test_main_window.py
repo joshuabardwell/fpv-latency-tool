@@ -539,6 +539,29 @@ class TestKeyboardNavigation:
         qtbot.keyClick(target, Qt.Key.Key_Right)
         assert loaded.timeline.current_frame == before + 1
 
+    def test_arrows_survive_a_click_on_the_timeline(self, loaded, qtbot):
+        """Regression: dragging the in/out/playhead handle gave TimelineWidget
+        ClickFocus. It doesn't handle keys itself, so the ignored keypress
+        propagated to left_scroll (the QAbstractScrollArea wrapping the left
+        column), which swallows arrow keys to scroll its viewport -- same
+        failure mode as test_arrows_survive_a_click_on_the_graph, just via a
+        plain QWidget descendant instead of the scroll area taking focus
+        directly."""
+        qtbot.mouseClick(loaded.timeline, Qt.MouseButton.LeftButton)
+        before = loaded.timeline.current_frame
+        target = loaded.focusWidget() or loaded
+        qtbot.keyClick(target, Qt.Key.Key_Right)
+        assert loaded.timeline.current_frame == before + 1
+
+    def test_arrows_survive_a_click_on_the_video(self, loaded, qtbot):
+        """Regression: same failure mode via the video preview (RoiFrameView),
+        also nested inside left_scroll."""
+        qtbot.mouseClick(loaded.frame_view, Qt.MouseButton.LeftButton)
+        before = loaded.timeline.current_frame
+        target = loaded.focusWidget() or loaded
+        qtbot.keyClick(target, Qt.Key.Key_Right)
+        assert loaded.timeline.current_frame == before + 1
+
     @pytest.mark.parametrize("table_attr", ["rise_results_table", "fall_results_table"])
     def test_table_click_does_not_steal_keyboard_focus(self, loaded, qtbot, table_attr):
         """Regression: results tables had no focus policy, so QTableView's

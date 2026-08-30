@@ -48,7 +48,14 @@ class TimelineWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(44)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # NoFocus: dragging the in/out/playhead handles only needs mouse capture,
+        # not keyboard focus. ClickFocus here let a handle-drag grab focus, and
+        # since this widget doesn't handle keys itself, the ignored keypress
+        # propagated to left_scroll (the QAbstractScrollArea ancestor), which
+        # swallows arrow keys to scroll its viewport -- same failure mode as
+        # main_window.py's left_scroll/table NoFocus fixes, just via a
+        # descendant instead of the scroll area taking focus directly.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self._frame_count = 0
         self._current_frame = 0
