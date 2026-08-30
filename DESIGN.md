@@ -240,14 +240,45 @@ not a defect, and must not be treated as bad data on its own.
 ### The three metrics
 
     first-pixel latency = display first_frame - source first_frame
-    full-frame  latency = display full_frame  - source full_frame
+    full-frame  latency = display full_frame  - source first_frame
     average     latency = mean of the two
 
-Each compares the **same point on the curve at both ends**, so a slow rise on
-the source cannot inflate the result. Average is a genuine half-frame value
-when the two differ, which is a resolution gain, not a rounding artifact. Where
-either end could not be characterized, all three fall back to the anchor delta
-rather than mixing an edge frame against an anchor frame.
+Both metrics are anchored at the **same zero point**: the source's own
+first-light frame. First-pixel compares it against the display's first-light;
+full-frame against the display's fully-lit. Average is a genuine half-frame
+value when the two differ, which is a resolution gain, not a rounding
+artifact. Where either end could not be characterized, all three fall back to
+the anchor delta rather than mixing an edge frame against an anchor frame.
+
+Full-frame deliberately does **not** subtract the source's own `full_frame`.
+An earlier version did, on the reasoning that each metric should compare "the
+same point on the curve at both ends" — but two edges each individually
+measured with `first_frame <= full_frame` give no guarantee about the
+relationship between *one edge's* `full_frame` and the *other's*. On footage
+of a flickering LED source whose plateau bounced for several frames after its
+steepest step, the source's own `full_frame` landed later than its
+`first_frame` purely from that bounce, and because the display settled cleanly
+and fast, full-frame latency came out *below* first-pixel latency for the same
+pair (29.2 ms vs 37.5 ms) — physically backwards, since the display can't
+finish showing a change earlier than its own reported first-light delay would
+suggest.
+
+Anchoring both metrics at the source's first-light instead fixes this
+structurally, not just for that footage: `full_delta - first_delta` is now
+always exactly `display.full_frame - display.first_frame`, the display's own
+ramp length, which is `>= 0` for every edge by construction (see
+`TransitionEdge` below). Full-frame latency can therefore never again read
+below first-pixel latency, regardless of how a given source settles.
+
+The tradeoff is explicit, not hidden: for a source with a real, non-trivial
+rise time — a computer-monitor test pattern filling by scanline is the
+documented case above — that rise time now flows into full-frame and average
+latency rather than canceling out against the source's own measurement. This
+is intentional. A known-fast source (an LED reaching full brightness in 1-2
+frames) contributes next to nothing either way; a source with a genuinely
+comparable rise time to the display contributes a real, honest amount, rather
+than a number whose sign depended on how precisely two independent
+measurements of the source's own settling happened to agree.
 
 For an instantaneous transition first = full = anchor, so a square-wave clip
 measures exactly as it did before this split existed.
@@ -289,6 +320,24 @@ high variance and tends to come out low, and under-estimating sigma is the
 dangerous direction — it narrows the band and reports first-light early. The
 pooled figure is scatter about each segment's own median, so using it as a
 floor costs no drift immunity.
+
+**Local sigma itself takes the larger of pre's and post's own MAD, computed
+separately — never one MAD pooled over both concatenated.** Pre (baseline) and
+post (plateau) can have genuinely different noise floors: on real 240fps
+footage of a flickering LED source, the dark baseline sat rock-steady while
+the lit plateau carried a few levels of real scatter (PWM flicker). Pooling
+let the quiet baseline's near-zero residuals drag the combined MAD down to
+~0.08 despite the plateau visibly bouncing several levels — sigma this
+underestimated let a too-tight band go uncrossed for several frames, delaying
+that transition's `full_frame` until noise happened to cross it by chance,
+which measured a 4-frame ramp on a source that reaches full brightness in 1-2
+frames. Taking each side's MAD separately fixed this without touching the
+pooled *global* floor above, which stays pooled across the whole signal — a
+tempting whole-signal "take the max across every chunk" alternative was tried
+and rejected, since one genuinely anomalous frame elsewhere in the clip (a
+spurious brightness spike mid-transition, unrelated to this fix) blew that
+estimate up to ~48 and made every band absurd. The dilution problem is local
+to one transition's own pre/post windows; fix it there.
 
 There is deliberately **no detrending**. For slow drift it is redundant given
 local baselines; for fast drift the data is genuinely corrupt and subtracting a

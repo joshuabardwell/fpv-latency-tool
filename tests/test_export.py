@@ -50,7 +50,7 @@ class TestCsvExport:
         assert line.endswith(",333.33,")  # trailing empty Warnings field
 
     def test_three_metrics_land_in_their_own_columns(self, tmp_path):
-        """Source ramps 8->12, display 20->28: first 12, full 16, avg 14."""
+        """Source ramps 8->12, display 20->28: first 12, full 20 (28-8), avg 16."""
         pair = LatencyPair(10, 22, "rising",
                            orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 28))
         path = tmp_path / "out.csv"
@@ -61,15 +61,15 @@ class TestCsvExport:
         assert row["Original 1st Pixel"] == "8"   # first-pixel, not the anchor 10
         assert row["Display 1st Pixel"] == "20"   # first-pixel, not the anchor 22
         assert row["First (frames)"] == "12.0"
-        assert row["Avg (frames)"] == "14.0"
-        assert row["Full (frames)"] == "16.0"
+        assert row["Avg (frames)"] == "16.0"
+        assert row["Full (frames)"] == "20.0"
 
     def test_half_frame_average_survives_export(self, tmp_path):
         pair = LatencyPair(10, 22, "rising",
                            orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 27))
         path = tmp_path / "out.csv"
         write_pairs_csv(path, [pair], fps=1000.0)
-        assert ",13.5," in path.read_text(encoding="utf-8").splitlines()[1]
+        assert ",15.5," in path.read_text(encoding="utf-8").splitlines()[1]
 
     def test_warnings_are_exported_semicolon_joined(self, tmp_path):
         """An exported measurement carries its own caveats; leaving them behind

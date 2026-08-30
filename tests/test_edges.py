@@ -155,6 +155,26 @@ class TestNoise:
         assert tight[10].full_frame <= loose[10].full_frame
 
 
+class TestAsymmetricNoise:
+    def test_noisy_plateau_after_a_quiet_baseline_does_not_inflate_the_ramp(self):
+        """Regression: the pre-transition baseline is exactly flat (a dark
+        sensor floor) while the post-transition plateau carries real scatter
+        (e.g. PWM flicker on a lit LED). Pooling their residuals into one MAD
+        let the quiet baseline's zero residuals dilute the plateau's real
+        noise to near-zero (sigma ~0.005 instead of ~12 on this data) — on
+        real 240fps footage this measured a 4-frame ramp on a source that
+        reaches full brightness in 1-2 frames, purely because the resulting
+        too-tight band took several frames for noise to cross by chance.
+        Local sigma must be the max of pre's and post's own MAD, taken
+        separately, not a single MAD over both pooled together."""
+        rng = np.random.default_rng(22)
+        data = np.full(60, DARK, dtype=np.float64)
+        data[30:] = BRIGHT
+        data[30:] += rng.normal(0.0, 12.0, 30)
+        edges, _ = characterize_signal(data, [30], [], 3.0)
+        assert edges[30].ramp_frames <= 1
+
+
 class TestPerTransitionWarnings:
     def test_diluted_contrast_flags_low_snr(self):
         """Display fills only part of an oversized ROI: the step survives but
@@ -186,13 +206,19 @@ class TestPerTransitionWarnings:
 
     def test_drift_located_as_a_transition_is_not_reported_clean(self):
         """A long monotonic climb is drift, not a transition. It must never
-        come back as a clean edge, whichever check happens to catch it.
+        come back as a clean edge, whichever check happens to catch it — here
+        either `unsteady-level` (the flat regions turn out not to be flat) or
+        `low-snr` (the same climb, read as scatter about a single median,
+        makes the effective noise huge relative to the amplitude — which is
+        exactly what fires once local sigma is the max of pre's and post's own
+        MAD rather than a single MAD pooled across both: a side that's mostly
+        climb, not flat, gets an honestly large MAD instead of one diluted by
+        the other side).
 
-        Note it is `unsteady-level` rather than `slow-ramp` that fires here:
-        with the climb filling the window, the plateau median is taken over the
-        climb itself, so the signal looks like it settles early and the ramp
-        measures deceptively short. The flatness of the level regions is what
-        actually gives it away."""
+        With the climb filling the window, the plateau median is taken over
+        the climb itself, so the signal looks like it settles early and the
+        ramp measures deceptively short. The flatness of the level regions is
+        what actually gives it away."""
         data = np.concatenate([
             np.full(6, DARK),
             np.linspace(DARK, BRIGHT, 28),
@@ -202,7 +228,10 @@ class TestPerTransitionWarnings:
         edges, _ = characterize_signal(data, anchors, [], 3.0)
         assert edges, "expected the ramp to be located at all"
         assert all(not e.is_clean for e in edges.values())
-        assert all(W_UNSTEADY_LEVEL in e.warnings for e in edges.values())
+        assert all(
+            W_UNSTEADY_LEVEL in e.warnings or W_LOW_SNR in e.warnings
+            for e in edges.values()
+        )
 
     def test_identical_ramps_get_the_same_verdict_either_side(self):
         """Regression: slow-ramp was measured against HALF the gap to the

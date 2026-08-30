@@ -95,18 +95,19 @@ def edge(anchor, first, full, polarity="rising", warnings=()):
 class TestThreeMetrics:
     def test_each_metric_compares_like_for_like(self):
         # Source ramps 8->12 (anchor 10), display ramps 20->28 (anchor 22).
-        # first: 20-8 = 12.  full: 28-12 = 16.  avg: 14.
+        # Both metrics share the source's first-light zero point (8):
+        # first: 20-8 = 12.  full: 28-8 = 20.  avg: 16.
         p = LatencyPair(10, 22, "rising",
                         orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 28))
         assert p.first_delta_frames() == 12.0
-        assert p.full_delta_frames() == 16.0
-        assert p.avg_delta_frames() == 14.0
+        assert p.full_delta_frames() == 20.0
+        assert p.avg_delta_frames() == 16.0
 
     def test_average_can_be_a_half_frame(self):
-        # first 12, full 15 -> 13.5, a real resolution gain over integer frames.
+        # first 12, full 19 (27-8) -> 15.5, a real resolution gain over integer frames.
         p = LatencyPair(10, 22, "rising",
                         orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 27))
-        assert p.avg_delta_frames() == 13.5
+        assert p.avg_delta_frames() == 15.5
 
     def test_metrics_differ_from_the_anchor_delta(self):
         """The whole point: the anchor sits somewhere inside the ramp, so it
@@ -115,6 +116,20 @@ class TestThreeMetrics:
                         orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 28))
         assert p.delta_frames() == 12
         assert p.full_delta_frames() != p.delta_frames()
+
+    def test_full_delta_cannot_read_below_first_delta(self):
+        """Regression: a source that settles slower than the display used to
+        make full-frame latency read BELOW first-pixel latency for the same
+        pair — physically backwards. Source ramps 8->12 (4 frames), display
+        ramps 20->22 (2 frames): the old formula gave full = 22-12 = 10,
+        first = 20-8 = 12, so full < first. Sharing the source's first-light
+        as the zero point for both ties the gap between them to the
+        display's own ramp (never negative), so full is now guaranteed
+        >= first: full = 22-8 = 14."""
+        p = LatencyPair(10, 21, "rising",
+                        orig_edge=edge(10, 8, 12), disp_edge=edge(21, 20, 22))
+        assert p.full_delta_frames() == 14.0
+        assert p.full_delta_frames() >= p.first_delta_frames()
 
     def test_instantaneous_transitions_collapse_to_the_anchor_delta(self):
         """Compatibility: on a square wave first == full == anchor, so all
@@ -129,7 +144,7 @@ class TestThreeMetrics:
         p = LatencyPair(10, 22, "rising",
                         orig_edge=edge(10, 8, 12), disp_edge=edge(22, 20, 28))
         assert p.first_delta_ms(240.0) == 12.0 / 240.0 * 1000.0
-        assert p.avg_delta_ms(240.0) == 14.0 / 240.0 * 1000.0
+        assert p.avg_delta_ms(240.0) == 16.0 / 240.0 * 1000.0
 
     def test_negative_first_latency_is_reported_not_clamped(self):
         """A display first-light before the source's means the band is too

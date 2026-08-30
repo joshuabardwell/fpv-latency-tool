@@ -24,25 +24,41 @@ class LatencyPair:
         return self.delta_frames() / fps * 1000.0
 
     # --- the three reported metrics ---------------------------------------
-    # Each compares the SAME point on the transition curve at both ends, so a
-    # slow rise on the source cannot inflate the result. Where either end could
-    # not be characterized, all three fall back to the anchor delta rather than
-    # reporting nothing: a transition at the very edge of the analysis range
-    # still deserves a usable row.
+    # First-pixel and full-frame both measure FROM the source's own first-light
+    # frame — not each end's own matching point. Comparing full-frame against
+    # the source's own full_frame depended on that measurement being
+    # trustworthy, and it wasn't always: two edges each individually measured
+    # with first_frame <= full_frame give no guarantee about the relationship
+    # between one edge's full_frame and the other's, so a source whose own
+    # settling was slower or noisier than the display's could make full-frame
+    # latency read BELOW first-pixel latency for the same pair — physically
+    # backwards, since the display can't finish showing a change earlier than
+    # its own reported first-light delay would suggest. Sharing one zero point
+    # ties `full_delta - first_delta` to exactly the DISPLAY's own ramp length
+    # (`disp.full_frame - disp.first_frame`), which is >= 0 by construction, so
+    # full-frame latency can never again read below first-pixel latency.
+    #
+    # Where either end could not be characterized, all three fall back to the
+    # anchor delta rather than reporting nothing: a transition at the very edge
+    # of the analysis range still deserves a usable row.
 
-    def _edge_delta(self, attr: str) -> float | None:
+    def _edge_delta(self, orig_attr: str, disp_attr: str) -> float | None:
         if self.orig_edge is None or self.disp_edge is None:
             return None
-        return float(getattr(self.disp_edge, attr) - getattr(self.orig_edge, attr))
+        return float(getattr(self.disp_edge, disp_attr) - getattr(self.orig_edge, orig_attr))
 
     def first_delta_frames(self) -> float:
         """Display first-light minus source first-light."""
-        delta = self._edge_delta("first_frame")
+        delta = self._edge_delta("first_frame", "first_frame")
         return float(self.delta_frames()) if delta is None else delta
 
     def full_delta_frames(self) -> float:
-        """Display fully-lit minus source fully-lit."""
-        delta = self._edge_delta("full_frame")
+        """Display fully-lit minus source first-light — the same zero point as
+        first-pixel latency, not the source's own fully-lit frame. That's what
+        guarantees this can never read below first_delta_frames(): the gap
+        between the two is exactly the display's own ramp length, never
+        negative."""
+        delta = self._edge_delta("first_frame", "full_frame")
         return float(self.delta_frames()) if delta is None else delta
 
     def avg_delta_frames(self) -> float:

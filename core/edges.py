@@ -6,12 +6,26 @@ Pure NumPy, no Qt — usable from the GUI and from tests alike.
 `core.detection` answers *which* transitions exist, returning the frame of
 steepest brightness change. This module answers *how far each one extends*:
 the first frame showing any light change, and the first frame at the settled
-level. Those two frames are what the three reported latency metrics are built
-from, each comparing the same point on the curve at both ends:
+level. Those two frames are what the three reported latency metrics
+(`core.latency.LatencyPair`) are built from, both anchored at the SOURCE's own
+first-light frame rather than at each end's own matching point:
 
     first-pixel latency = display first_frame - source first_frame
-    full-frame  latency = display full_frame  - source full_frame
+    full-frame  latency = display full_frame  - source first_frame
     average     latency = mean of the two
+
+Full-frame deliberately does not use the source's own full_frame. Two edges
+that were each individually measured with first_frame <= full_frame (see
+TransitionEdge below) give no guarantee about the relationship between one
+edge's full_frame and the other's — on real 240fps footage of a flickering LED
+source, the source's own plateau bounced for several frames after its
+steepest step, pushing its measured full_frame later than the display's, and
+full-frame latency read *below* first-pixel latency for the same pair:
+physically backwards, since the display can't finish showing a change earlier
+than its own reported first-light delay would suggest. Sharing one zero point
+(source first_frame) for both metrics ties the gap between them entirely to
+the DISPLAY's own ramp, which is `>= 0` by construction, so full-frame latency
+can never again read below first-pixel latency.
 
 Everything here is measured *locally*, per transition, against its own
 baseline, plateau and noise estimate. That is what makes the measurement
@@ -291,10 +305,18 @@ def _characterize_one(
     # estimates keeps the drift immunity (the pooled figure is scatter about
     # each segment's own median, not about a global level) while refusing to
     # trust a suspiciously quiet local sample.
+    #
+    # pre and post get their MAD taken SEPARATELY, then the larger one wins —
+    # never pooled into one MAD over their concatenation. Pre (baseline) and
+    # post (plateau) can have genuinely different noise floors: on real 240fps
+    # footage a dark baseline sat rock-steady while the lit plateau carried a
+    # few levels of real scatter (PWM flicker). Pooling let the quiet side's
+    # near-zero residuals drag the combined MAD down to ~0.08 despite the
+    # plateau visibly bouncing several levels, which under-estimated sigma
+    # for exactly the side that needed it most and delayed full-frame
+    # detection until noise happened to cross the resulting too-tight band.
     if pre.size >= MIN_FLAT_FRAMES and post.size >= MIN_FLAT_FRAMES:
-        local_sigma = _mad(
-            np.concatenate([pre - np.median(pre), post - np.median(post)])
-        )
+        local_sigma = max(_mad(pre - np.median(pre)), _mad(post - np.median(post)))
         sigma = max(local_sigma, global_sigma)
     else:
         sigma = global_sigma
