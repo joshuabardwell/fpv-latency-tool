@@ -18,6 +18,7 @@ from core.edges import (TransitionEdge, W_AMBIGUOUS_EDGE, W_LOW_SNR,
                         W_UNSTEADY_LEVEL)
 from core.latency import LatencyPair
 from core.roi import ROI
+from core.session import load_session, sidecar_path_for
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
 from ui.main_window import (COL_DISP_FIRST, COL_ORIG_FIRST, SUMMARY_METRICS,
                             WARNING_TEXT, MainWindow, _existing_file)
@@ -185,7 +186,7 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Exclude", "⚠", "Original\n1st Pixel", "Display\n1st Pixel",
+        expected = ["Exclude", "⚠", "✎", "Original\n1st Pixel", "Display\n1st Pixel",
                     "First (ms)", "Avg (ms)", "Full (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
@@ -1255,3 +1256,361 @@ class TestEdgeSensitivityControl:
         analyze(loaded, qtbot)
         loaded.edge_sigma_spin.setValue(4.5)
         assert "--edge-sigma 4.5" in loaded._build_cli_command()
+
+
+# --------------------------------------------------- manual transition editing
+#
+# The review loop is the deliverable, so there is a test per binding: analyze,
+# walk the transitions with the arrow keys, correct what is wrong, and have the
+# corrections outlive every parameter change and the app itself.
+#
+# The synthetic clip's transitions are instantaneous, so first-light and
+# fully-lit coincide on every one of them — which makes it exactly the footage
+# the push rule (core.manual.set_frame) exists for.
+
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+
+
+def cli_args(**overrides):
+    """An argparse namespace with everything omitted, then the given flags —
+    the shape main() hands apply_cli_args."""
+    args = SimpleNamespace(
+        fps=None, direction=None, roi_original=None, roi_display=None,
+        min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
+        in_point=None, out_point=None, no_sidecar=False,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+@pytest.fixture(autouse=True)
+def _no_stale_sidecar(synth_video):
+    """synth_video is session-scoped, so a sidecar written beside it would be
+    restored into every later test that opens the clip."""
+    path = sidecar_path_for(synth_video)
+    path.unlink(missing_ok=True)
+    yield
+    path.unlink(missing_ok=True)
+
+
+def reviewed(win, qtbot):
+    """Analyzed, with the first transition selected the way pressing ↓ does."""
+    analyze(win, qtbot)
+    win.show_frame(0)
+    qtbot.keyClick(win, Qt.Key.Key_Down)
+    return win
+
+
+class TestReviewNavigation:
+    def test_next_transition_selects_what_it_lands_on(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.show_frame(0)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        target = loaded.brightness_graph.selection()
+        assert target is not None
+        assert loaded.brightness_graph.marker_frame(target) == loaded.timeline.current_frame
+
+    def test_walking_back_selects_too(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        second = loaded.brightness_graph.selection()
+        qtbot.keyClick(loaded, Qt.Key.Key_Up)
+        assert loaded.brightness_graph.selection() != second
+
+    def test_plain_arrows_step_the_playhead_without_touching_the_selection(self, loaded, qtbot):
+        """The verification keys: stepping a frame either side of a marker to
+        judge it must not cost the user their hold on it."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        qtbot.keyClick(loaded, Qt.Key.Key_Left)
+        qtbot.keyClick(loaded, Qt.Key.Key_Left)
+        assert loaded.brightness_graph.selection() == target
+
+    def test_clicking_a_results_row_selects_that_transition(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        index = loaded._rise_results_proxy.index(0, loaded._orig_frame_col)
+        loaded._on_results_row_clicked(index)
+        target = loaded.brightness_graph.selection()
+        assert target is not None and target.roi == "original"
+
+    def test_escape_clears_the_selection(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Escape)
+        assert loaded.brightness_graph.selection() is None
+
+    def test_escape_still_cancels_a_running_extraction(self, loaded, qtbot):
+        """Cancel outranks clearing a selection — Escape during a long decode
+        has always meant "stop", and must keep meaning it."""
+        loaded._on_analyze_clicked()
+        qtbot.keyClick(loaded, Qt.Key.Key_Escape)
+        qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
+        assert loaded.brightness_graph.get_pairs() == []
+
+
+class TestNudging:
+    def test_shift_right_moves_the_marker_and_the_reported_latency(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before_frames = loaded.brightness_graph.resolved_frames(target)
+        before_ms = loaded._rise_results_model.item(0, 5).text()
+
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+
+        after = loaded.brightness_graph.resolved_frames(target)
+        assert after[0] == before_frames[0] + 1
+        assert loaded._rise_results_model.item(0, 5).text() != before_ms
+
+    def test_the_playhead_follows_the_marker(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        target = loaded.brightness_graph.selection()
+        moved = loaded.brightness_graph.resolved_frames(target)[0]
+        assert loaded.timeline.current_frame == moved
+
+    def test_a_coincident_transition_moves_as_one(self, loaded, qtbot):
+        """first == full on every transition in this clip, so nudging
+        first-light right has to carry fully-lit with it or the key is dead."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        first, full = loaded.brightness_graph.resolved_frames(target)
+        assert first == full
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded.brightness_graph.resolved_frames(target) == (first + 1, full + 1)
+        assert "pushed" in loaded.status_label.text()
+
+    def test_shift_down_and_up_switch_ends(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down, SHIFT)
+        assert loaded.brightness_graph.selection().which == "full"
+        qtbot.keyClick(loaded, Qt.Key.Key_Up, SHIFT)
+        assert loaded.brightness_graph.selection().which == "first"
+
+    def test_m_snaps_the_marker_to_the_playhead(self, loaded, qtbot):
+        """The fast path when a marker is badly placed: scrub to the frame that
+        is actually right, press M."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        loaded.show_frame(loaded.timeline.current_frame - 3)
+        qtbot.keyClick(loaded, Qt.Key.Key_M)
+        assert loaded.brightness_graph.resolved_frames(target)[0] == loaded.timeline.current_frame
+
+    def test_nudging_with_nothing_selected_only_says_so(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        before = list(loaded.brightness_graph.get_pairs())
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded.brightness_graph.get_pairs() == before
+        assert "Select a transition marker first" in loaded.status_label.text()
+
+    def test_an_edited_pair_is_marked_in_the_results_table(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        assert loaded._rise_results_model.item(0, loaded._manual_col).text() == ""
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded._rise_results_model.item(0, loaded._manual_col).text() == "✎"
+
+    def test_reset_restores_the_measured_frames(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before = loaded.brightness_graph.resolved_frames(target)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded._reset_selected()
+        assert loaded.brightness_graph.resolved_frames(target) == before
+        assert loaded._manual_edits == []
+
+    def test_reset_all_discards_everything(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert len(loaded._manual_edits) == 2
+        loaded._reset_all_edits()
+        assert loaded._manual_edits == []
+
+
+class TestDeleteTransition:
+    def test_delete_drops_the_pair_and_restore_brings_it_back(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        before = len(loaded.brightness_graph.get_pairs())
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert len(loaded.brightness_graph.get_pairs()) == before - 1
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert len(loaded.brightness_graph.get_pairs()) == before
+        assert loaded._manual_edits == []
+
+    def test_a_deleted_transition_stays_selected_so_it_can_be_undone(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        target = loaded.brightness_graph.selection()
+        assert target is not None
+        assert loaded.brightness_graph.is_deleted(target)
+        assert loaded.edit_panel.delete_btn.text() == "Restore"
+
+
+class TestEditPanelReadout:
+    def test_the_panel_shows_both_ends_and_the_automatic_value(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert "first-light" in loaded.edit_panel.first_label.text()
+        assert "fully-lit" in loaded.edit_panel.full_label.text()
+        # The automatic frame is shown beside the chosen one, which is what
+        # makes Reset a meaningful offer.
+        assert "auto" in loaded.edit_panel.first_label.text()
+
+    def test_the_panel_is_inert_with_nothing_selected(self, window):
+        assert window.edit_panel.title_label.text() == "No transition selected"
+        assert not window.edit_panel.nudge_fwd_btn.isEnabled()
+
+    def test_the_panel_buttons_do_what_the_keys_do(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before = loaded.brightness_graph.resolved_frames(target)
+        loaded.edit_panel.nudge_fwd_btn.click()
+        assert loaded.brightness_graph.resolved_frames(target)[0] == before[0] + 1
+
+
+class TestExclusionsSurviveANudge:
+    def test_a_nudge_keeps_the_exclude_ticks(self, loaded, qtbot):
+        """Pairing keys on anchors, which nudging never touches, so the
+        positional exclusion indices still mean what they meant. Clearing them
+        on every keypress would make the two features unusable together."""
+        reviewed(loaded, qtbot)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(
+            Qt.CheckState.Checked)
+        assert loaded._rise_excluded == {0}
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded._rise_excluded == {0}
+
+    def test_a_deletion_clears_them(self, loaded, qtbot):
+        """A deletion genuinely re-pairs, so a position no longer means what it
+        did and the ticks have to go."""
+        reviewed(loaded, qtbot)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(
+            Qt.CheckState.Checked)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert loaded._rise_excluded == set()
+
+
+class TestSidecar:
+    def test_nothing_is_written_before_an_analysis(self, loaded):
+        """Opening and scrubbing footage must not drop files beside it."""
+        loaded._save_sidecar()
+        assert not sidecar_path_for(loaded.reader.metadata.path).exists()
+
+    def test_settings_are_written_after_an_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded._save_sidecar()
+        state = load_session(loaded.reader.metadata.path)
+        assert state is not None
+        assert state.roi_original == (ROI_ORIG.x, ROI_ORIG.y, ROI_ORIG.width, ROI_ORIG.height)
+        assert state.min_delta == loaded.delta_spin.value()
+
+    def test_manual_edits_are_written(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded._save_sidecar()
+        state = load_session(loaded.reader.metadata.path)
+        assert state.manual_edits == loaded._manual_edits
+
+    def test_reopening_restores_settings_and_edits(self, loaded, qtbot, synth_video):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded.spacing_spin.setValue(4)
+        loaded._save_sidecar()
+        edits = list(loaded._manual_edits)
+
+        loaded.open_file(synth_video)
+        assert loaded._manual_edits == edits
+        assert loaded.spacing_spin.value() == 4
+        assert loaded.frame_view.get_roi("original") == ROI_ORIG
+        # Restoring must not start a decode pass on its own.
+        assert loaded._extractor is None
+        assert loaded.brightness_graph.get_pairs() == []
+
+    def test_a_restored_threshold_survives_the_auto_computation(self, loaded, qtbot, synth_video):
+        """A saved Min Δ is a decision, not a default: the auto-compute at the
+        end of extraction must not overwrite it."""
+        analyze(loaded, qtbot)
+        loaded.delta_spin.setValue(33)
+        loaded._save_sidecar()
+
+        loaded.open_file(synth_video)
+        loaded.frame_view.set_roi("original", ROI_ORIG)
+        loaded.frame_view.set_roi("display", ROI_DISP)
+        analyze(loaded, qtbot)
+        assert loaded.delta_spin.value() == 33
+
+    def test_a_cli_flag_beats_the_sidecar_and_omitted_ones_come_from_it(
+        self, loaded, qtbot, synth_video
+    ):
+        analyze(loaded, qtbot)
+        loaded.delta_spin.setValue(33)
+        loaded.spacing_spin.setValue(7)
+        loaded._save_sidecar()
+
+        loaded.open_file(synth_video)
+        loaded.apply_cli_args(cli_args(min_delta=41))
+        assert loaded.delta_spin.value() == 41   # the flag the user typed
+        assert loaded.spacing_spin.value() == 7  # the one they didn't
+
+    def test_no_sidecar_neither_reads_nor_writes(self, window, qtbot, synth_video):
+        window.open_file(synth_video)
+        window.frame_view.set_roi("original", ROI_ORIG)
+        window.frame_view.set_roi("display", ROI_DISP)
+        analyze(window, qtbot)
+        window._save_sidecar()
+        assert sidecar_path_for(synth_video).exists()
+
+        window.set_sidecar_enabled(False)
+        window.spacing_spin.setValue(9)
+        window.open_file(synth_video)
+        assert window.spacing_spin.value() == 9   # not overwritten by the file
+        window._save_sidecar()
+        assert load_session(synth_video).min_spacing != 9
+
+    def test_an_unwritable_location_is_reported_not_raised(self, loaded, qtbot, monkeypatch):
+        """A read-only card or a vanished network share must not interrupt a
+        review pass — the measurement is unaffected either way."""
+        analyze(loaded, qtbot)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("ui.main_window.save_session", boom)
+        loaded._save_sidecar()
+        assert "Could not save settings" in loaded.status_label.text()
+
+
+class TestEditPanelEdgeCases:
+    def test_reset_is_offered_whenever_an_edit_exists(self, loaded, qtbot):
+        """Even a marker nudged away and back still carries a pinned value, so
+        Reset keyed on "do the frames differ" would leave no way to clear it."""
+        reviewed(loaded, qtbot)
+        assert not loaded.edit_panel.reset_btn.isEnabled()
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Left, SHIFT)
+        assert loaded._manual_edits          # still pinned, back at the auto frames
+        assert loaded.edit_panel.reset_btn.isEnabled()
+
+    def test_a_deleted_transition_shows_no_position_count(self, loaded, qtbot):
+        """It is not one of the stops Up/Down walks, so "transition 0 of 4"
+        would be a lie."""
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        title = loaded.edit_panel.title_label.text()
+        assert "deleted" in title
+        assert "transition 0" not in title
+
+    def test_the_panel_agrees_with_the_ring_on_a_deleted_transition(self, loaded, qtbot):
+        """A ring on the graph with "No transition selected" underneath would
+        be the panel and the graph disagreeing about what is selected."""
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert loaded._selection_info() is not None
+        assert loaded.edit_panel.title_label.text() != "No transition selected"
+
+    def test_switching_ends_on_a_deleted_transition_does_not_crash(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Up, SHIFT)
+        assert loaded.brightness_graph.selection() is not None

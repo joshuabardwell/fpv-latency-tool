@@ -12,6 +12,7 @@ import argparse
 import os
 import statistics
 import sys
+from dataclasses import replace
 from typing import NamedTuple
 
 import cv2
@@ -64,9 +65,17 @@ from core.edges import (
 from core.export import write_pairs_csv
 from core.extractor import BrightnessExtractor
 from core.latency import default_max_latency_frames
+from core.manual import EditTarget, ManualEdit, find_edit, set_frame, upsert
 from core.roi import ROI
+from core.session import SessionState, load_session, save_session, sidecar_path_for
 from core.video_io import VideoReader
 from ui.brightness_graph import BrightnessGraphWidget
+from ui.edit_panel import (
+    SelectionInfo,
+    TransitionEditPanel,
+    polarity_label,
+    roi_label,
+)
 from ui.roi_frame_view import RoiFrameView
 from ui.timeline import TimelineWidget
 from ui.zoom_bar import ZoomBarWidget
@@ -260,6 +269,27 @@ class MainWindow(QMainWindow):
         self._fall_excluded: set[int] = set()
         self._rise_show_excluded_only: bool = False
         self._fall_show_excluded_only: bool = False
+
+        # Signature of the pair list the exclusion sets above were built
+        # against: (orig_frame, disp_frame) per pair, per direction. Exclusions
+        # are positional, so they are cleared when — and only when — this
+        # actually changes. A nudge cannot change it (pairing keys on anchors,
+        # which nudging never touches), so a review pass no longer throws away
+        # the Exclude ticks it has already made.
+        self._pair_signature: tuple | None = None
+
+        # Manual transition edits (core.manual). MainWindow owns the
+        # authoritative list — it is what the sidecar persists — and pushes it
+        # to the graph, which re-resolves it onto moved anchors and hands the
+        # updated list back via manual_edits_rebound.
+        self._manual_edits: list[ManualEdit] = []
+        self._sidecar_enabled: bool = True
+        # Written only once a clip has been analyzed, so merely opening and
+        # scrubbing footage never drops files beside it.
+        self._analyzed_once: bool = False
+        self._sidecar_timer = QTimer(self)
+        self._sidecar_timer.setSingleShot(True)
+        self._sidecar_timer.setInterval(500)
 
         # Results-table row highlight tracking the playhead's matched pair
         # (see _apply_playhead_highlight). Independent of exclusion state.
@@ -500,6 +530,13 @@ class MainWindow(QMainWindow):
         self.brightness_graph = BrightnessGraphWidget()
         layout.addWidget(self.brightness_graph)
 
+        # ── Manual transition editing ─────────────────────────────────────
+        # Directly under the graph it acts on: reviewing is a loop between the
+        # marker, the video frame and this readout, and putting it anywhere
+        # else would make that loop cross the window.
+        self.edit_panel = TransitionEditPanel()
+        layout.addWidget(self.edit_panel)
+
         # ── Pairs summary ─────────────────────────────────────────────────
         self.pairs_label = QLabel("")
         self.pairs_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -604,12 +641,16 @@ class MainWindow(QMainWindow):
         # triple the width for a number nobody reads once ms is present, and the
         # average is a half-frame value that reads badly as an integer. All
         # three still go to the CSV in frames.
+        # ✎ sits beside ⚠ rather than replacing it: they answer different
+        # questions ("did a person place this" vs "does the signal look
+        # trustworthy") and a pair can carry both.
         result_columns = [
-            "Exclude", "⚠", COL_ORIG_FIRST, COL_DISP_FIRST,
+            "Exclude", "⚠", "✎", COL_ORIG_FIRST, COL_DISP_FIRST,
             "First (ms)", "Avg (ms)", "Full (ms)",
         ]
         self._exclude_col = result_columns.index("Exclude")
         self._warn_col = result_columns.index("⚠")
+        self._manual_col = result_columns.index("✎")
         self._orig_frame_col = result_columns.index(COL_ORIG_FIRST)
 
         rise_panel = self._build_results_table("Dark To Light Transitions", result_columns)
@@ -767,6 +808,25 @@ class MainWindow(QMainWindow):
         self.brightness_graph.pairs_updated.connect(self._update_fps_verify_row)
         self.brightness_graph.pairs_updated.connect(self._on_pairs_rebuilt)
         self.brightness_graph.playhead_pair_changed.connect(self._on_playhead_pair_changed)
+        self.brightness_graph.selection_changed.connect(self._on_selection_changed)
+        # Store-only, deliberately: see _on_manual_edits_rebound.
+        self.brightness_graph.manual_edits_rebound.connect(self._on_manual_edits_rebound)
+
+        self.edit_panel.nudge_requested.connect(self._nudge_selected)
+        self.edit_panel.set_to_playhead_requested.connect(self._set_selected_to_playhead)
+        self.edit_panel.delete_toggled.connect(self._delete_selected)
+        self.edit_panel.reset_requested.connect(self._reset_selected)
+        self.edit_panel.reset_all_requested.connect(self._on_reset_all_clicked)
+
+        # Sidecar persistence. The detection spinboxes need no entry here: they
+        # all drive a redetect, and _on_pairs_rebuilt schedules a save at the
+        # end of one. These are the settings that change without one.
+        self._sidecar_timer.timeout.connect(self._save_sidecar)
+        self.fps_spin.valueChanged.connect(lambda _: self._schedule_sidecar_save())
+        self.polarity_combo.currentIndexChanged.connect(lambda _: self._schedule_sidecar_save())
+        self.frame_view.roi_changed.connect(lambda *_: self._schedule_sidecar_save())
+        self.timeline.in_point_changed.connect(lambda _: self._schedule_sidecar_save())
+        self.timeline.out_point_changed.connect(lambda _: self._schedule_sidecar_save())
         self.known_period_spin.valueChanged.connect(self._update_fps_verify_row)
         self.show_cli_btn.clicked.connect(self._on_show_cli)
         self.export_csv_btn.clicked.connect(self._on_export_csv)
@@ -845,9 +905,86 @@ class MainWindow(QMainWindow):
         self._reset_roi_state()
         self._set_controls_enabled(True)
         self.show_cli_btn.setEnabled(True)
+        self._load_sidecar()
         self._update_analyze_button()
         self._update_inout_label()
         self.show_frame(0)
+
+    # ------------------------------------------------------------- sidecar
+
+    def set_sidecar_enabled(self, enabled: bool) -> None:
+        """Turn the per-clip settings file off entirely (--no-sidecar). Must be
+        called before open_file to suppress a read."""
+        self._sidecar_enabled = enabled
+
+    def _load_sidecar(self) -> None:
+        """Restore this clip's saved settings and manual edits, if it has any.
+
+        Deliberately does NOT start an analysis. Extraction is a full decode
+        pass, and kicking one off unasked would lock the UI for as long as the
+        clip is long every time the file is opened; the ROIs and every
+        parameter come back, and Analyze is one click away."""
+        self._manual_edits = []
+        self.brightness_graph.set_manual_edits([])
+        self._analyzed_once = False
+        if not self._sidecar_enabled or self.reader is None:
+            return
+        state = load_session(self.reader.metadata.path)
+        if state is None:
+            return
+        self._apply_settings(state, source="sidecar")
+        # A restored threshold is a decision, not a default: without these the
+        # auto-compute in _on_extract_finished would overwrite it on Analyze.
+        if state.min_delta is not None:
+            self._delta_user_set = True
+        if state.max_latency is not None:
+            self._max_latency_user_set = True
+        self._manual_edits = list(state.manual_edits)
+        self.brightness_graph.set_manual_edits(self._manual_edits)
+        self.status_label.setText(
+            f"Restored settings from {sidecar_path_for(self.reader.metadata.path).name}"
+            + (f" ({len(self._manual_edits)} manual edits)" if self._manual_edits else "")
+        )
+
+    def _current_session_state(self) -> SessionState:
+        roi_orig = self.frame_view.get_roi("original")
+        roi_disp = self.frame_view.get_roi("display")
+
+        def as_tuple(roi):
+            return None if roi is None else (roi.x, roi.y, roi.width, roi.height)
+
+        return SessionState(
+            fps=self.fps_spin.value(),
+            roi_original=as_tuple(roi_orig),
+            roi_display=as_tuple(roi_disp),
+            direction=self.polarity_combo.currentData(),
+            min_delta=self.delta_spin.value(),
+            min_spacing=self.spacing_spin.value(),
+            edge_sigma=self.edge_sigma_spin.value(),
+            max_latency=self.max_latency_spin.value(),
+            in_point=self.timeline.in_point,
+            out_point=self.timeline.out_point,
+            manual_edits=list(self._manual_edits),
+        )
+
+    def _schedule_sidecar_save(self) -> None:
+        """Debounced: nudging holds down Shift+→ and every repeat would
+        otherwise be a file write."""
+        if self._sidecar_enabled and self._analyzed_once and self.reader is not None:
+            self._sidecar_timer.start()
+
+    def _save_sidecar(self) -> None:
+        if not self._sidecar_enabled or not self._analyzed_once or self.reader is None:
+            return
+        try:
+            path = save_session(self.reader.metadata.path, self._current_session_state())
+        except OSError as e:
+            # Read-only media, a full disk, a network share that went away. The
+            # measurement is unaffected, so say so and carry on rather than
+            # interrupting a review pass with a dialog.
+            self.status_label.setText(f"Could not save settings: {e}")
+            return
+        self.status_label.setText(f"Settings saved to {path.name}")
 
     def on_fps_override_changed(self, value: float) -> None:
         if self.reader is not None:
@@ -966,8 +1103,27 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------- keyboard shortcuts
 
     def keyPressEvent(self, event) -> None:
-        """Navigation keys, reached only when no focused widget consumed them
-        (a focused spinbox keeps its own arrow/Home/End handling)."""
+        """Navigation and editing keys, reached only when no focused widget
+        consumed them (a focused spinbox keeps its own arrow/Home/End handling).
+
+        The editing layer sits on Shift+arrows plus M and Delete, all of which
+        were free: this method has only ever dispatched on unmodified keys.
+        Vertically the keys choose WHICH point (first-light / fully-lit),
+        horizontally they MOVE it. Plain arrows stay pure playhead stepping —
+        they are how the user checks a marker against the footage, and taking
+        them would cost the loop the whole feature exists for."""
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if mods == Qt.KeyboardModifier.ShiftModifier:
+            shift_handler = {
+                Qt.Key.Key_Left:  lambda: self._nudge_selected(-1),
+                Qt.Key.Key_Right: lambda: self._nudge_selected(1),
+                Qt.Key.Key_Up:    lambda: self._select_end("first"),
+                Qt.Key.Key_Down:  lambda: self._select_end("full"),
+            }.get(event.key())
+            if shift_handler is not None:
+                shift_handler()
+                event.accept()
+                return
         handlers = {
             Qt.Key.Key_Left:     lambda: self.timeline.step(-1),
             Qt.Key.Key_Right:    lambda: self.timeline.step(1),
@@ -980,10 +1136,13 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_Home:     self._goto_in,
             Qt.Key.Key_End:      self._goto_out,
             Qt.Key.Key_Space:    self._toggle_playback,
-            Qt.Key.Key_Escape:   self._on_cancel_clicked,
+            Qt.Key.Key_Escape:   self._on_escape,
+            # M for "mark", matching I and O marking the in and out points.
+            Qt.Key.Key_M:        self._set_selected_to_playhead,
+            Qt.Key.Key_Delete:   self._delete_selected,
         }
         handler = handlers.get(event.key())
-        plain = not (event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
+        plain = not mods
         if handler is not None and plain:
             handler()
             event.accept()
@@ -1007,18 +1166,23 @@ class MainWindow(QMainWindow):
             self.show_frame(self.timeline.out_point)
 
     def _goto_prev_transition(self) -> None:
-        if self.reader is None:
-            return
-        frame = self.brightness_graph.prev_transition(self.timeline.current_frame)
-        if frame is not None:
-            self.show_frame(frame)
+        self._goto_transition(self.brightness_graph.prev_transition)
 
     def _goto_next_transition(self) -> None:
+        self._goto_transition(self.brightness_graph.next_transition)
+
+    def _goto_transition(self, find) -> None:
+        """Walk to the next/previous transition AND select the marker there.
+
+        Selecting is what turns Up/Down into a review pass: without it every
+        transition would need a mouse trip to the graph before it could be
+        nudged, which is the one flow this is all for."""
         if self.reader is None:
             return
-        frame = self.brightness_graph.next_transition(self.timeline.current_frame)
+        frame = find(self.timeline.current_frame)
         if frame is not None:
             self.show_frame(frame)
+            self.brightness_graph.select_frame(frame)
 
     def _goto_prev_unmatched(self) -> None:
         if self.reader is None:
@@ -1073,16 +1237,31 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Keyboard Shortcuts",
-            "Left / Right   Step one frame\n"
-            "Up / Down      Previous / next transition\n"
-            "PgUp / PgDn    Jump ~1 second (≈ fps frames)\n"
-            "Space          Play / pause\n"
-            "I              Set in point at playhead\n"
-            "O              Set out point at playhead\n"
-            "Home           Jump playhead to in point\n"
-            "End            Jump playhead to out point\n"
-            "Ctrl+Z         Undo last ROI change\n"
-            "F1  /  ?       Show this help",
+            "NAVIGATION\n"
+            "Left / Right         Step one frame\n"
+            "Up / Down            Previous / next transition (also selects it)\n"
+            "PgUp / PgDn          Jump ~1 second (≈ fps frames)\n"
+            "Space                Play / pause\n"
+            "I                    Set in point at playhead\n"
+            "O                    Set out point at playhead\n"
+            "Home                 Jump playhead to in point\n"
+            "End                  Jump playhead to out point\n"
+            "\n"
+            "CORRECTING A TRANSITION\n"
+            "Shift+Left / Right   Move the selected marker one frame\n"
+            "Shift+Up / Down      Select first-light / fully-lit\n"
+            "M                    Move the selected marker to the playhead\n"
+            "Delete               Delete the selected transition / restore it\n"
+            "Esc                  Clear the selection\n"
+            "\n"
+            "Walk the transitions with Up/Down, step either side of a marker\n"
+            "with Left/Right to check it against the video, and correct it with\n"
+            "the keys above. Corrections survive every parameter change and are\n"
+            "saved beside the clip.\n"
+            "\n"
+            "OTHER\n"
+            "Ctrl+Z               Undo last ROI change\n"
+            "F1  /  ?             Show this help",
         )
 
     # -------------------------------------------------------- in/out handlers
@@ -1128,6 +1307,11 @@ class MainWindow(QMainWindow):
             return
 
         self._results_polarity = self.polarity_combo.currentData()
+        # Clicking Analyze is an explicit "start this measurement over", so it
+        # drops the exclusions unconditionally — even if the run happens to
+        # produce byte-identical pairs, which the signature comparison in
+        # _on_pairs_rebuilt would otherwise treat as nothing having changed.
+        self._pair_signature = None
 
         # A replaced-but-still-running worker would be garbage collected
         # while its thread is alive (hard crash) — make sure it is done.
@@ -1262,11 +1446,226 @@ class MainWindow(QMainWindow):
                 f"Analysis complete — {count} frames extracted "
                 f"(frames {first_frame}–{first_frame + count - 1})"
             )
+        # From here on this clip's settings are worth keeping. Gating on a
+        # completed analysis is what stops a sidecar appearing beside footage
+        # somebody only opened and scrubbed through.
+        self._analyzed_once = True
+        self._schedule_sidecar_save()
 
     def _on_results_row_clicked(self, index) -> None:
         value = index.sibling(index.row(), self._orig_frame_col).data()
         if value is not None and self.reader is not None:
-            self.show_frame(int(value))
+            frame = int(value)
+            self.show_frame(frame)
+            # The table is a way into the review, not just a readout: clicking
+            # a row arrives with that transition selected and ready to nudge.
+            self.brightness_graph.select_frame(frame)
+
+    # ------------------------------------------- manual transition editing
+
+    def _set_manual_edits(self, edits: list[ManualEdit], message: str | None = None) -> None:
+        """The one place the edit list is replaced. Pushing to the graph re-runs
+        the pipeline, which emits pairs_updated and refreshes everything
+        downstream of it."""
+        self._manual_edits = list(edits)
+        self.brightness_graph.set_manual_edits(self._manual_edits)
+        self._refresh_edit_panel()
+        self._schedule_sidecar_save()
+        if message:
+            self.status_label.setText(message)
+
+    def _on_manual_edits_rebound(self, edits) -> None:
+        """A redetect re-resolved the edits onto moved anchors. STORE ONLY —
+        pushing them back would re-enter the redetect that produced them."""
+        self._manual_edits = list(edits)
+
+    def _on_selection_changed(self, _target) -> None:
+        self._refresh_edit_panel()
+
+    def _refresh_edit_panel(self) -> None:
+        if hasattr(self, "edit_panel"):
+            self.edit_panel.show_selection(self._selection_info(), len(self._manual_edits))
+
+    def _selection_info(self) -> SelectionInfo | None:
+        graph = self.brightness_graph
+        target = graph.selection()
+        if target is None:
+            return None
+        deleted = graph.is_deleted(target)
+        edit = find_edit(
+            self._manual_edits, target.roi, target.polarity, target.anchor_frame
+        )
+        frames = graph.resolved_frames(target)
+        if frames is None:
+            # No edge: either the transition was deleted (its anchor is dropped
+            # before characterization runs) or it could not be characterized at
+            # all. Either way the marker is drawn at the anchor, and the panel
+            # has to agree with the ring rather than go blank.
+            first = target.anchor_frame if edit is None or edit.first_frame is None else edit.first_frame
+            full = first if edit is None or edit.full_frame is None else edit.full_frame
+            frames = (first, full)
+        auto_first, auto_full = graph.auto_frames(target) or (None, None)
+        position, total = graph.transition_position(target)
+        return SelectionInfo(
+            roi=target.roi,
+            polarity=target.polarity,
+            which=target.which,
+            first_frame=frames[0],
+            full_frame=frames[1],
+            auto_first=auto_first,
+            auto_full=auto_full,
+            deleted=deleted,
+            has_edit=edit is not None,
+            position=position,
+            total=total,
+            edit_count=len(self._manual_edits),
+        )
+
+    def _require_selection(self) -> EditTarget | None:
+        target = self.brightness_graph.selection()
+        if target is None:
+            self.status_label.setText(
+                "Select a transition marker first — click one, or press ↑/↓"
+            )
+        return target
+
+    def _edit_for(self, target: EditTarget) -> ManualEdit:
+        """This transition's edit, or a fresh empty one to build on."""
+        return find_edit(
+            self._manual_edits, target.roi, target.polarity, target.anchor_frame
+        ) or ManualEdit(target.roi, target.polarity, target.anchor_frame)
+
+    def _place_selected(self, value: int) -> None:
+        target = self._require_selection()
+        if target is None:
+            return
+        graph = self.brightness_graph
+        edge = graph.edge_for(target)
+        if edge is None:
+            self.status_label.setText(
+                "That transition has no measured extent, so there is nothing to move."
+            )
+            return
+        lo, hi = graph.analysis_bounds()
+        before = graph.resolved_frames(target)
+        self._set_manual_edits(
+            upsert(self._manual_edits, set_frame(self._edit_for(target), edge, target.which, value, lo, hi))
+        )
+        after = graph.resolved_frames(target)
+        if after is None:
+            return
+        moved = after[0] if target.which == "first" else after[1]
+        # The playhead follows the marker: the whole point of the loop is to
+        # look at the frame you just decided on.
+        self.show_frame(moved)
+        idx = 0 if target.which == "first" else 1
+        name = "first-light" if idx == 0 else "fully-lit"
+        other = "fully-lit" if idx == 0 else "first-light"
+        was = before[idx] if before is not None else moved
+        # Say so when the push carried the other end along, or it would move
+        # invisibly — the two can share a frame, where the graph draws only one
+        # marker (see core.manual.set_frame).
+        detail = (
+            f" (pushed {other} to {after[1 - idx]})"
+            if before is not None and before[1 - idx] != after[1 - idx]
+            else ""
+        )
+        self.status_label.setText(
+            f"{roi_label(target.roi)} {polarity_label(target.polarity)} "
+            f"{name} {was} → {moved}{detail}"
+        )
+
+    def _nudge_selected(self, delta: int) -> None:
+        target = self._require_selection()
+        if target is None:
+            return
+        frames = self.brightness_graph.resolved_frames(target)
+        if frames is None:
+            self.status_label.setText(
+                "That transition has no measured extent, so there is nothing to move."
+            )
+            return
+        current = frames[0] if target.which == "first" else frames[1]
+        self._place_selected(current + delta)
+
+    def _set_selected_to_playhead(self) -> None:
+        self._place_selected(self.timeline.current_frame)
+
+    def _select_end(self, which: str) -> None:
+        """Shift+↑/↓: first-light is the earlier end, fully-lit the later one,
+        so up/down map to them directly rather than toggling — pressing the same
+        key twice must not walk back to where it started."""
+        target = self._require_selection()
+        if target is None:
+            return
+        if target.which != which:
+            self.brightness_graph.set_selection(replace(target, which=which))
+        selected = self.brightness_graph.selection()
+        if selected is None:
+            return  # the transition went away under us; nothing to look at
+        frame = self.brightness_graph.marker_frame(selected)
+        if frame is not None:
+            self.show_frame(frame)
+
+    def _delete_selected(self) -> None:
+        target = self._require_selection()
+        if target is None:
+            return
+        edit = self._edit_for(target)
+        restoring = edit.deleted
+        label = f"{roi_label(target.roi)} {polarity_label(target.polarity)} transition"
+        self._set_manual_edits(
+            upsert(self._manual_edits, replace(edit, deleted=not restoring)),
+            f"Restored {label}" if restoring
+            else f"Deleted {label} — it no longer takes part in pairing",
+        )
+
+    def _reset_selected(self) -> None:
+        target = self._require_selection()
+        if target is None:
+            return
+        remaining = [
+            e for e in self._manual_edits
+            if (e.roi, e.polarity, e.anchor_frame) != target.transition
+        ]
+        if len(remaining) == len(self._manual_edits):
+            return
+        self._set_manual_edits(remaining, "Restored the measured transition")
+        selected = self.brightness_graph.selection()
+        if selected is None:
+            return
+        frame = self.brightness_graph.marker_frame(selected)
+        if frame is not None:
+            self.show_frame(frame)
+
+    def _on_reset_all_clicked(self) -> None:
+        if not self._manual_edits:
+            return
+        answer = QMessageBox.question(
+            self, "Discard manual edits",
+            f"Discard all {len(self._manual_edits)} manual edits on this clip?\n"
+            "Every transition goes back to what the algorithm measured.",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Discard:
+            self._reset_all_edits()
+
+    def _reset_all_edits(self) -> None:
+        count = len(self._manual_edits)
+        if not count:
+            return
+        self._set_manual_edits(
+            [], f"Discarded {count} manual edit" + ("" if count == 1 else "s")
+        )
+
+    def _on_escape(self) -> None:
+        """Cancel wins while an extraction is running; otherwise Escape means
+        "never mind" about the selection."""
+        if self._extractor is not None and self._extractor.isRunning():
+            self._on_cancel_clicked()
+        else:
+            self.brightness_graph.clear_selection()
 
     def _update_export_csv_enabled(self) -> None:
         self.export_csv_btn.setEnabled(bool(self.brightness_graph.get_pairs()))
@@ -1280,16 +1679,37 @@ class MainWindow(QMainWindow):
         fall_pairs = self.brightness_graph.get_pairs_for("falling", active=mode) if mode else []
         return rise_pairs, fall_pairs, fps
 
+    def _pairs_signature(self) -> tuple:
+        """What the positional exclusion indices actually depend on: which pairs
+        exist, in which order, per direction."""
+        rise_pairs, fall_pairs, _ = self._current_direction_pairs()
+        return tuple(
+            tuple((p.orig_frame, p.disp_frame) for p in pairs)
+            for pairs in (rise_pairs, fall_pairs)
+        )
+
     def _on_pairs_rebuilt(self) -> None:
-        """pairs_updated fired because pairs were genuinely recomputed
-        (redetect or a fresh Analyze run) — any manual exclusions no longer
-        correspond to anything meaningful, since pairs have no identity
-        across a redetect."""
-        self._rise_excluded.clear()
-        self._fall_excluded.clear()
-        self._rise_show_excluded_only = False
-        self._fall_show_excluded_only = False
+        """pairs_updated fired because the pipeline ran again. Exclusions are
+        positions in the pairs list, so they are dropped when the list of pairs
+        itself changed — and only then.
+
+        Comparing the pair list rather than reacting to the signal matters now
+        that a marker can be nudged mid-review: a nudge re-runs the pipeline but
+        provably cannot re-pair anything (pairing keys on anchors, which nudging
+        never touches), so wiping the user's Exclude ticks on every keypress
+        would make the two features unusable together. A deletion, a threshold
+        change that moves anchors, or a fresh Analyze all do change the list and
+        still clear, which is what the rule was protecting against."""
+        signature = self._pairs_signature()
+        if signature != self._pair_signature:
+            self._pair_signature = signature
+            self._rise_excluded.clear()
+            self._fall_excluded.clear()
+            self._rise_show_excluded_only = False
+            self._fall_show_excluded_only = False
         self._update_results_table()
+        self._refresh_edit_panel()
+        self._schedule_sidecar_save()
 
     def _sync_exclude_controls(self, direction: str) -> None:
         rise_pairs, fall_pairs, _ = self._current_direction_pairs()
@@ -1450,9 +1870,21 @@ class MainWindow(QMainWindow):
                 warn_item.setToolTip(_warning_tooltip(warnings))
                 warn_item.setForeground(QBrush(QColor(230, 90, 230)))
 
+            manual_ends = p.manual_ends()
+            manual_item = QStandardItem("✎" if manual_ends else "")
+            manual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if manual_ends:
+                manual_item.setToolTip(
+                    "Placed by hand: "
+                    + " and ".join(manual_ends)
+                    + ". Reset it from the Transition Editing panel."
+                )
+                manual_item.setForeground(QBrush(QColor(255, 255, 255)))
+
             model.appendRow([
                 exclude_item,
                 warn_item,
+                manual_item,
                 QStandardItem(str(p.orig_first_frame())),
                 QStandardItem(str(p.disp_first_frame())),
                 QStandardItem(f"{p.first_delta_ms(fps):.1f}"),
@@ -1614,7 +2046,26 @@ class MainWindow(QMainWindow):
             self.computed_fps_label.setText("Computed FPS: --")
 
     def apply_cli_args(self, args) -> None:
+        """CLI arguments are applied AFTER any sidecar the opened clip had, so
+        a flag the user actually typed wins and every flag they omitted comes
+        from the sidecar. main() relies on that ordering: open_file first, this
+        second."""
         self._cli_args = args
+        if getattr(args, "no_sidecar", False):
+            self._sidecar_enabled = False
+        self._apply_settings(args)
+
+    def _apply_settings(self, args, source: str = "cli") -> None:
+        """Apply a settings bundle — a CLI namespace or a restored
+        SessionState, which carry the same field names precisely so this is the
+        only place that knows what any of them mean. A None field means "says
+        nothing about this" and leaves the control alone.
+
+        `source` only names things in the warnings: a clamped value restored
+        from a settings file must not be reported as a bad command line."""
+        def opt(name: str) -> str:
+            return f"--{name}" if source == "cli" else f"the saved {name}"
+
         if args.fps is not None and self.reader is not None:
             self.fps_spin.setValue(args.fps)
         if args.direction is not None:
@@ -1638,7 +2089,7 @@ class MainWindow(QMainWindow):
             # hint. Warn loudly instead of failing silently.
             meta = self.reader.metadata
             warnings.append(
-                f"--roi-{' and --roi-'.join(oob)} extends outside the "
+                f"{' and '.join(opt(f'roi-{n}') for n in oob)} extends outside the "
                 f"video frame ({meta.width}x{meta.height}) and will be clipped — "
                 f"check the ROI overlay before trusting results"
             )
@@ -1654,7 +2105,7 @@ class MainWindow(QMainWindow):
             self.timeline.set_in_point(args.in_point)
             if self.timeline.in_point != args.in_point:
                 warnings.append(
-                    f"--in-point {args.in_point} is out of range and was "
+                    f"{opt('in-point')} {args.in_point} is out of range and was "
                     f"clamped to {self.timeline.in_point}"
                 )
         if args.out_point is not None:
@@ -1664,7 +2115,7 @@ class MainWindow(QMainWindow):
                 # --in-point/--out-point pair used to clamp silently to a
                 # different range than requested, with no indication.
                 warnings.append(
-                    f"--out-point {args.out_point} conflicts with the in "
+                    f"{opt('out-point')} {args.out_point} conflicts with the in "
                     f"point and was clamped to {self.timeline.out_point}"
                 )
         if warnings:
@@ -1691,6 +2142,8 @@ class MainWindow(QMainWindow):
         parts.append(f"--max-latency {self.max_latency_spin.value()}")
         parts.append(f"--in-point {self.timeline.in_point}")
         parts.append(f"--out-point {self.timeline.out_point}")
+        if not self._sidecar_enabled:
+            parts.append("--no-sidecar")
         return " ".join(parts)
 
     def _on_show_cli(self) -> None:
@@ -1823,13 +2276,22 @@ def main() -> None:
     parser.add_argument("--max-latency",  type=int,          metavar="FRAMES")
     parser.add_argument("--in-point",     type=int,          metavar="FRAME")
     parser.add_argument("--out-point",    type=int,          metavar="FRAME")
+    parser.add_argument(
+        "--no-sidecar", action="store_true",
+        help="Don't read or write the <video>.latency.json settings file",
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    # Before open_file, which is what reads the sidecar — apply_cli_args runs
+    # too late to suppress a read that has already happened.
+    window.set_sidecar_enabled(not args.no_sidecar)
     if args.file:
         window.open_file(args.file)
+    # After open_file, so a flag the user typed overrides the restored value
+    # and an omitted flag leaves it alone.
     window.apply_cli_args(args)
     sys.exit(app.exec())
 

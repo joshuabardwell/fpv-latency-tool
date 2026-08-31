@@ -4,6 +4,7 @@ from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent
 from pyqtgraph.graphicsItems.ScatterPlotItem import Symbols
 
+from core.manual import EditTarget, ManualEdit
 from core.view_range import MIN_ZOOM_FRAMES
 from ui.brightness_graph import BrightnessGraphWidget
 
@@ -1006,3 +1007,172 @@ class TestExcludedCoversEdgeMarkers:
         g = load_graph_with_ramps(qtbot)
         g.set_excluded_pairs({0}, set())
         assert g._sc_fall_orig.data["brush"][0] is None
+
+
+class TestManualEditingPipeline:
+    """core.manual applied through the graph's own detect->characterize->pair
+    chain. The pure functions are covered in test_manual.py; these check the
+    wiring and the two invariants the pipeline order exists to protect."""
+
+    def test_an_override_moves_the_marker_and_the_metric(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        pair = g.get_pairs_for("rising")[0]
+        before = pair.first_delta_frames()
+        g.set_manual_edits([
+            ManualEdit("display", "rising", 9, first_frame=8, full_frame=12)
+        ])
+        assert 8 in list(g._sc_rise_disp.data["x"])
+        assert g.get_pairs_for("rising")[0].first_delta_frames() == before - 1
+
+    def test_nudging_never_repairs(self, qtbot):
+        """The reason overrides are applied downstream of pairing's inputs:
+        pairing keys on anchors, which an override never touches."""
+        g = load_graph_with_ramps(qtbot)
+        before = [(p.orig_frame, p.disp_frame) for p in g.get_pairs()]
+        g.set_manual_edits([
+            ManualEdit("display", "rising", 9, first_frame=8, full_frame=20)
+        ])
+        assert [(p.orig_frame, p.disp_frame) for p in g.get_pairs()] == before
+
+    def test_deleting_a_transition_removes_its_pair(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        before = len(g.get_pairs())
+        g.set_manual_edits([ManualEdit("display", "rising", 9, deleted=True)])
+        assert len(g.get_pairs()) == before - 1
+        assert 9 not in g._rise_disp_frames
+
+    def test_deleting_a_false_read_lets_the_real_one_pair(self, qtbot):
+        """The case the feature exists for: a spurious display transition
+        detected before the real one steals the greedy match, and deleting it
+        hands the match back."""
+        orig = np.concatenate([np.full(10, 20.0), np.full(30, 220.0)])
+        disp = np.concatenate([
+            np.full(12, 20.0), [120.0], np.full(5, 20.0), np.full(22, 220.0),
+        ])
+        g = make_graph(qtbot)
+        g.set_data(orig, disp, in_point=0)
+        g.set_delta(60.0)
+        blip, real = g._rise_disp_frames[0], g._rise_disp_frames[1]
+        assert g.get_pairs_for("rising")[0].disp_frame == blip
+
+        g.set_manual_edits([ManualEdit("display", "rising", blip, deleted=True)])
+        assert g.get_pairs_for("rising")[0].disp_frame == real
+
+    def test_edits_survive_an_edge_sensitivity_change(self, qtbot):
+        """Anchors do not move when sigma changes, so an edit bound to one
+        stays bound - this is what "the user's decision is authoritative"
+        means in practice."""
+        g = load_graph_with_ramps(qtbot)
+        g.set_manual_edits([
+            ManualEdit("display", "rising", 9, first_frame=7, full_frame=13)
+        ])
+        g.set_sigma_k(12.0)
+        assert g._disp_edges[9].first_frame == 7
+        assert g._disp_edges[9].full_frame == 13
+        assert g._disp_edges[9].manual is True
+
+    def test_no_edits_leaves_the_graph_byte_identical(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        before = list(g._sc_rise_disp.data["x"]), list(g._sc_rise_disp.data["y"])
+        g.set_manual_edits([])
+        assert (list(g._sc_rise_disp.data["x"]), list(g._sc_rise_disp.data["y"])) == before
+
+
+class TestManualEditingRendering:
+    def test_a_manual_marker_gets_the_manual_outline(self, qtbot):
+        from ui.brightness_graph import _MANUAL_OUTLINE
+
+        g = load_graph_with_ramps(qtbot)
+        g.set_manual_edits([
+            ManualEdit("display", "rising", 9, first_frame=8, full_frame=12)
+        ])
+        pens = g._sc_rise_disp.data["pen"]
+        assert any(p.color().getRgb()[:3] == _MANUAL_OUTLINE for p in pens)
+
+    def test_a_deleted_transition_draws_a_cross_and_no_triangle(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.set_manual_edits([ManualEdit("display", "rising", 9, deleted=True)])
+        assert list(g._sc_deleted.data["x"]) == [9.0]
+        assert 9 not in list(g._sc_rise_disp.data["x"])
+
+    def test_a_deleted_transition_is_skipped_by_navigation(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert 9 in g._transition_frames
+        g.set_manual_edits([ManualEdit("display", "rising", 9, deleted=True)])
+        assert 9 not in g._transition_frames
+
+    def test_a_dormant_deletion_draws_nothing(self, qtbot):
+        """An edit whose anchor detection no longer finds must not claim a
+        transition was removed that was never there this pass."""
+        g = load_graph_with_ramps(qtbot)
+        g.set_manual_edits([ManualEdit("display", "rising", 999, deleted=True)])
+        assert list(g._sc_deleted.data["x"]) == []
+
+
+class TestManualEditingSelection:
+    def test_select_frame_picks_the_marker_drawn_there(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert g.select_frame(9)
+        assert g.selection() == EditTarget("display", "rising", 9, "first")
+
+    def test_select_frame_returns_false_where_there_is_no_marker(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        assert not g.select_frame(2)
+        assert g.selection() is None
+
+    def test_selection_emits_once_per_change(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        seen = []
+        g.selection_changed.connect(seen.append)
+        g.select_frame(9)
+        g.select_frame(9)          # same marker: no second emission
+        g.clear_selection()
+        assert seen == [EditTarget("display", "rising", 9, "first"), None]
+
+    def test_a_coincident_transition_still_exposes_both_ends(self, qtbot):
+        """first == full is the normal shape for an instantaneous transition
+        and the graph draws one triangle there, so the fully-lit end has to be
+        reachable through the selection rather than by clicking."""
+        data = np.concatenate([np.full(10, 20.0), np.full(20, 220.0)])
+        g = make_graph(qtbot)
+        g.set_data(data, data.copy(), in_point=0)
+        anchor = g._rise_orig_frames[0]
+        assert g._orig_edges[anchor].first_frame == g._orig_edges[anchor].full_frame
+        target = EditTarget("original", "rising", anchor, "full")
+        assert g.marker_frame(target) == anchor
+
+    def test_the_selection_ring_follows_a_nudged_marker(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.select_frame(9)
+        g.set_manual_edits([
+            ManualEdit("display", "rising", 9, first_frame=7, full_frame=12)
+        ])
+        assert list(g._sc_selection.data["x"]) == [7.0]
+
+    def test_a_selection_whose_transition_vanishes_is_dropped(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.select_frame(9)
+        seen = []
+        g.selection_changed.connect(seen.append)
+        g.set_delta(500.0)  # nothing survives this threshold
+        assert g.selection() is None
+        assert seen == [None]
+
+    def test_a_deleted_transition_stays_selectable(self, qtbot):
+        """A deletion the user cannot select is one they cannot undo."""
+        g = load_graph_with_ramps(qtbot)
+        g.set_manual_edits([ManualEdit("display", "rising", 9, deleted=True)])
+        assert g.select_frame(9)
+        assert g.is_deleted(g.selection())
+
+    def test_transition_position_counts_the_navigation_stops(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.select_frame(5)  # the first transition in the clip
+        assert g.transition_position(g.selection()) == (1, 4)
+
+    def test_clear_data_drops_the_selection(self, qtbot):
+        g = load_graph_with_ramps(qtbot)
+        g.select_frame(9)
+        g.clear_data()
+        assert g.selection() is None
+        assert list(g._sc_selection.data["x"]) == []

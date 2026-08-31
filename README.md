@@ -15,6 +15,8 @@ Measures glass-to-glass latency by analyzing a video that captures two screens s
 - **Measurement-quality warnings** — flags transitions whose measurement can't be trusted (low contrast, motion mid-transition, a baseline that isn't level); warns rather than hiding, with an "Exclude Flagged" button when you agree. It also reports whether an ROI's baseline or contrast varies across the clip, but as information rather than a warning: that's normal when the device under test has auto-exposure (its AE opens up through each dark stretch), and the measurements compensate for it. The tool never guesses *why* a baseline moved — framing, changing light, a nudged camera and AE all look identical in the signal
 - **Results table** — original frame, display frame, and first-pixel / average / full-frame latency in ms; click a row to jump to that frame; CSV export carries all three in frames and ms, plus any warnings
 - **FPS verification** — measure the test pattern's periodicity and cross-check against the known period to compute the true frame rate
+- **Manual transition editing** — the first pass is a starting point, not the last word. Walk the transitions with Up/Down, check each against the video, and nudge a marker a frame at a time (or drop it onto the playhead) when it's wrong. A false read can be deleted outright so the real transition beside it gets matched instead. Your corrections outrank the algorithm and survive every parameter change
+- **Per-clip settings file** — after the first analysis, every parameter, both ROIs, the in/out points and all your manual corrections are saved to `<video>.latency.json` beside the footage, and restored when you reopen the clip. Any CLI flag you pass overrides the saved value; the ones you leave out come from the file. Turn it off with `--no-sidecar`
 - **CLI parameters** — pre-fill settings from the command line for reproducible runs; "Show CLI Options" dialog copies the full command
 
 > **Detection limitation:** transitions are found where a *single*
@@ -22,6 +24,11 @@ Measures glass-to-glass latency by analyzing a video that captures two screens s
 > fade spread over several frames (e.g. LCD pixel response) can be missed even
 > though the total change is large — lower the threshold or use a test pattern
 > with a hard edge. See DESIGN.md for details.
+>
+> More generally, no threshold reads every clip correctly: settings tuned
+> for clean footage produce false edges on noisy footage and vice versa.
+> That is why the markers are editable — see *Reviewing and correcting
+> transitions* below.
 
 ## Download
 
@@ -105,18 +112,65 @@ python main.py [file]
                [--edge-sigma   FLOAT]
                [--in-point     INT]
                [--out-point    INT]
+               [--no-sidecar]
 ```
+
+Settings are read from `<video>.latency.json` first, then any flag you
+actually typed is applied on top — so the command line overrides the saved
+session one setting at a time. `--no-sidecar` ignores the file entirely and
+writes nothing.
+
+## Reviewing and correcting transitions
+
+Automatic detection gets most transitions right and some of them wrong, and
+which ones depends on the footage. Rather than hiding that behind more
+thresholds, the tool lets you check its work and fix it.
+
+After Analyze, walk the clip:
+
+1. **Down** jumps to the next transition and selects its marker. The
+   *Transition Editing* panel under the graph shows which transition it is, both
+   of its measured frames, and how far through the clip you are.
+2. **Left / Right** step one frame at a time. Look at the video: is the frame
+   before the first-light marker really dark? These keys never move the marker,
+   only the playhead, so you can step around freely.
+3. Fix what's wrong:
+
+| The marker is… | Do this |
+|---|---|
+| right | **Down** — on to the next one |
+| off by a frame or two | **Shift+←** / **Shift+→** |
+| off by a lot | scrub to the frame that's actually right, then **M** |
+| the wrong end | **Shift+↓** for fully-lit, **Shift+↑** for first-light |
+| not a real transition | **Delete** — it drops out of pairing and the real transition beside it gets matched instead. **Delete** again to bring it back |
+
+Every one of those has a button in the panel if you'd rather use the mouse, and
+clicking a marker on the graph (or a row in the results table) selects it.
+
+A marker you've placed is outlined in white on the graph, its pair gets a ✎ in
+the results table, and the panel shows the automatic value beside yours so
+**Reset** means something. A deleted transition stays visible as a grey ×.
+
+Your corrections outrank the algorithm: changing Edge Sensitivity, Min
+ΔBrightness or anything else re-measures every transition *except* the ones
+you've placed by hand. They're saved beside the clip, so closing the app and
+reopening the file picks the review back up where you left it.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
 | Left / Right | Step one frame |
-| Up / Down | Previous / next transition (lands on first-pixel) |
+| Up / Down | Previous / next transition (lands on first-pixel, and selects it) |
 | PgUp / PgDn | Jump ~1 second |
 | Space | Play / pause |
 | I / O | Set in / out point at playhead |
 | Home / End | Jump to in / out point |
+| Shift+← / Shift+→ | Move the selected marker one frame |
+| Shift+↑ / Shift+↓ | Select first-light / fully-lit |
+| M | Move the selected marker to the playhead |
+| Delete | Delete the selected transition / restore it |
+| Esc | Clear the selection (cancels analysis while one is running) |
 | Ctrl+Z | Undo last ROI change |
 | F1 / ? | Show this help |
 
@@ -140,10 +194,13 @@ fpv-latency-tool/
 │   ├── export.py             # CSV export
 │   ├── extractor.py          # QThread brightness extraction worker
 │   ├── latency.py            # LatencyPair dataclass + pairing algorithm
+│   ├── manual.py             # user-placed transitions, overriding detection
 │   ├── roi.py                # ROI dataclass: pixel coords + mean_brightness()
+│   ├── session.py            # <video>.latency.json per-clip settings file
 │   └── video_io.py           # VideoReader: frame-accurate seeking, metadata
 ├── ui/
 │   ├── brightness_graph.py   # pyqtgraph brightness traces + transition markers
+│   ├── edit_panel.py         # selected-marker readout + editing buttons
 │   ├── main_window.py        # main window: controls, layout, wiring
 │   ├── roi_frame_view.py     # click-drag ROI overlay on the video frame
 │   └── timeline.py           # playhead + in/out handle widget
