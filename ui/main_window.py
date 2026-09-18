@@ -30,6 +30,7 @@ from PyQt6.QtGui import (
     QStandardItemModel,
 )
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QComboBox,
     QDialog,
@@ -87,6 +88,38 @@ class _ReleaseFocusOnCommit(QObject):
                 event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)):
             QTimer.singleShot(0, _release_spinbox_focus)
         return False  # let the widget handle the key normally as well
+
+
+class _ClickAwayReleasesSpinboxFocus(QObject):
+    """App-wide filter: a mouse press anywhere outside the currently-focused
+    detection-parameter spinbox releases its focus.
+
+    Every such spinbox uses ClickFocus so its own arrow/Home/End editing
+    works while the user is actually in it, but Qt never reclaims that focus
+    on its own: the graph, timeline, video preview, results tables and
+    buttons are all NoFocus precisely so they don't steal it *back* — so
+    nothing ever un-focuses the spinbox, and it goes on eating every
+    navigation/editing key (see keyPressEvent) until the user manually Tabs
+    away or commits with Enter/Escape.
+
+    Deliberately doesn't key off the clicked widget's own focusPolicy: a
+    composite widget's internal parts (e.g. a QAbstractScrollArea's
+    viewport) can report a stronger nominal policy than the widget it
+    belongs to even though that widget's own overridden mouse handling means
+    the policy is never actually acted on -- checking it here would only
+    reproduce that inconsistency. Clearing focus unconditionally on
+    "clicked something else" is safe: if the click target *does* want focus
+    (another spinbox, a combo box), Qt assigns it right after this filter
+    returns, overriding the clear.
+    """
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            focus = QApplication.focusWidget()
+            if isinstance(focus, QAbstractSpinBox):
+                target = QApplication.widgetAt(event.globalPosition().toPoint())
+                if target is None or (target is not focus and not focus.isAncestorOf(target)):
+                    focus.clearFocus()
+        return False  # let the click be handled normally as well
 
 
 class ResultsPanel(NamedTuple):
@@ -195,6 +228,9 @@ class MainWindow(QMainWindow):
         self._wire_events()
         self._set_controls_enabled(False)
         self._update_results_table()
+
+        self._click_away_filter = _ClickAwayReleasesSpinboxFocus()
+        QApplication.instance().installEventFilter(self._click_away_filter)
 
     # ---------------------------------------------------------- UI setup
 
@@ -1546,6 +1582,7 @@ class MainWindow(QMainWindow):
         self._stop_extractor()
         if self.reader is not None:
             self.reader.release()
+        QApplication.instance().removeEventFilter(self._click_away_filter)
         event.accept()
 
 
