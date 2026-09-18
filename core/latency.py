@@ -107,6 +107,23 @@ class LatencyPair:
     def is_clean(self) -> bool:
         return not self.quality_warnings()
 
+    def is_manually_adjusted(self) -> bool:
+        """Either end placed by hand (see core.manual). Drives the results
+        table's edit marker only — it is not a quality verdict, and a hand-placed
+        measurement is if anything the more trustworthy one."""
+        return any(
+            edge is not None and edge.manual
+            for edge in (self.orig_edge, self.disp_edge)
+        )
+
+    def manual_ends(self) -> tuple[str, ...]:
+        """Which ends were placed by hand, for the results-table tooltip."""
+        return tuple(
+            name
+            for name, edge in (("source", self.orig_edge), ("display", self.disp_edge))
+            if edge is not None and edge.manual
+        )
+
 
 DEFAULT_MAX_LATENCY_FRACTION = 0.5  # fraction of Original Period used as the Max Latency default
 

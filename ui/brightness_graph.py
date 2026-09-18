@@ -33,6 +33,13 @@ from PyQt6.QtGui import QPainterPath
 from core.detection import apply_min_spacing, find_falling, find_rising
 from core.edges import DEFAULT_SIGMA_K, SignalQuality, TransitionEdge, characterize_signal
 from core.latency import LatencyPair, pair_transitions
+from core.manual import (
+    EditTarget,
+    ManualEdit,
+    apply_overrides,
+    delete_anchors,
+    rebind,
+)
 from core.view_range import MIN_ZOOM_FRAMES, center_range, clamp_range, pan_range, zoom_range
 
 _WHEEL_ZOOM_IN  = 0.85          # per-notch scale factor when zooming in
@@ -68,6 +75,22 @@ _WARN_OUTLINE = (230, 90, 230)
 # one.
 _MID_MARKER = (150, 150, 150)
 _MID_MARKER_SIZE = 5
+
+# Outline for a marker the user has placed by hand (core.manual). Like the
+# warning outline above it composes with any fill, and it wins over the warning
+# outline when a marker would carry both: a hand-placed edge has already had the
+# question the warning was asking answered by a person looking at the footage.
+_MANUAL_OUTLINE = (255, 255, 255)
+
+# A transition the user has deleted. Still drawn — a deletion the user cannot
+# see is one they cannot check or undo — but as an inert cross rather than a
+# triangle, and dim enough not to compete with the transitions that count.
+_DELETED_MARKER = (120, 120, 120)
+
+# The selection ring. Cyan is the one hue not already carrying a meaning here:
+# white is the matched-pair highlight, magenta the quality warning, red
+# unmatched, gray excluded/deleted.
+_SELECT_RING = (0, 210, 255)
 
 _PLAYHEAD_SYMBOL_SIZE    = 16  # ScatterPlotItem `size=` -- must be >= 2x the
                                # farthest path point from the anchor (7px here)
@@ -106,6 +129,12 @@ class BrightnessGraphWidget(pg.PlotWidget):
     domain_changed = pyqtSignal(float, float)          # plotted-data range changed (set_data/clear_data)
     playhead_pair_changed = pyqtSignal(object)          # LatencyPair | None -- playhead only, not hover
     frame_clicked = pyqtSignal(int)                     # a click (not a drag) seeked here
+    selection_changed = pyqtSignal(object)              # EditTarget | None -- the marker being edited
+    # Emitted when a redetect re-resolved the user's edits onto moved anchors
+    # (core.manual.rebind). MainWindow owns the list and must only STORE what
+    # arrives here — calling set_manual_edits back would re-enter _redetect,
+    # the same non-reentrancy rule that governs set_excluded_pairs.
+    manual_edits_rebound = pyqtSignal(object)           # list[ManualEdit]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -163,6 +192,15 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self.addItem(self._sc_unmatched_rise)
         self.addItem(self._sc_unmatched_fall)
 
+        # Transitions the user has deleted. One item for both polarities and
+        # both signals: a deleted transition has no polarity-dependent meaning
+        # left — it is out of pairing entirely — so the ▲/▼ distinction would be
+        # telling the user about a difference that no longer matters.
+        self._sc_deleted = pg.ScatterPlotItem(
+            pen=pg.mkPen(_DELETED_MARKER, width=1.5), brush=None, size=9, symbol="x",
+        )
+        self.addItem(self._sc_deleted)
+
         # Hover indicator: a vertical line at the frame a click would seek to
         # (hidden while dragging or hovering a marker -- see
         # _update_cursor_and_line). Dashed and muted so it's never confused
@@ -189,6 +227,15 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self.addItem(self._sc_highlight)
         self._connector_highlight = self.plot(pen=pg.mkPen(_HIGHLIGHT, width=3))
         self._connector_highlight.setZValue(2)
+
+        # Ring around the marker currently being edited. Above the matched-pair
+        # highlight, since the two routinely land on the same marker and the one
+        # that answers "what will the nudge keys move" has to stay readable.
+        self._sc_selection = pg.ScatterPlotItem(
+            pen=pg.mkPen(_SELECT_RING, width=2), brush=None, size=22, symbol="o",
+        )
+        self._sc_selection.setZValue(3)
+        self.addItem(self._sc_selection)
 
         # Playhead: short thick stalk + triangle anchored to the bottom of
         # the plot (mirrors TimelineWidget's own playhead shape) instead of
@@ -241,6 +288,11 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # so the rest of this widget only ever sees absolute video frames).
         self._orig_edges: dict[int, TransitionEdge] = {}
         self._disp_edges: dict[int, TransitionEdge] = {}
+        # The same edges as measured, BEFORE any manual override was applied.
+        # Kept so the edit panel can show what the algorithm said beside what
+        # the user chose, which is what makes Reset a meaningful offer.
+        self._orig_auto_edges: dict[int, TransitionEdge] = {}
+        self._disp_auto_edges: dict[int, TransitionEdge] = {}
         self._orig_quality = SignalQuality(0.0, 0.0, 0.0, False, False)
         self._disp_quality = SignalQuality(0.0, 0.0, 0.0, False, False)
         # Which marker frames belong to the original signal, so a frame looked
@@ -283,6 +335,22 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # implicitly on every redetect since the pairs lists are rebuilt.
         self._rise_excluded_idx: set[int] = set()
         self._fall_excluded_idx: set[int] = set()
+
+        # Manual editing (core.manual). MainWindow owns the authoritative list
+        # — it is what gets written to the sidecar — and pushes it here with
+        # set_manual_edits; this copy is what _redetect reads, and _redetect is
+        # also what re-resolves it onto moved anchors.
+        self._manual_edits: list[ManualEdit] = []
+        self._selection: EditTarget | None = None
+        # Every marker frame -> the transition ends drawn there, in a stable
+        # order (original before display, rising before falling, first-light
+        # before fully-lit) so a click on coincident markers is deterministic.
+        self._frame_to_markers: dict[int, list[EditTarget]] = {}
+        # Anchors detection found this pass, BEFORE deletions were applied.
+        # A deleted transition has no edge and no anchor left downstream, so
+        # this is what says whether one is genuinely deleted (draw the cross)
+        # or merely dormant because detection no longer finds it at all.
+        self._detected_anchors: dict[tuple[str, str], set[int]] = {}
 
     # ------------------------------------------------------------------ public
 
@@ -398,14 +466,21 @@ class BrightnessGraphWidget(pg.PlotWidget):
         for item in (self._line_orig, self._line_disp):
             item.setData(x=[], y=[])
         self._orig_edges, self._disp_edges = {}, {}
+        self._orig_auto_edges, self._disp_auto_edges = {}, {}
         self._orig_quality = SignalQuality(0.0, 0.0, 0.0, False, False)
         self._disp_quality = SignalQuality(0.0, 0.0, 0.0, False, False)
         self._orig_marker_frames = set()
+        # The edit list itself deliberately survives: it belongs to the clip,
+        # not to one extraction pass, so re-analyzing the same footage keeps the
+        # user's review. MainWindow replaces it when a different file is opened.
+        self._frame_to_markers = {}
+        self._detected_anchors = {}
         for sc in (self._sc_rise_orig, self._sc_fall_orig,
                    self._sc_rise_disp, self._sc_fall_disp,
                    self._sc_mid_rise_orig, self._sc_mid_fall_orig,
                    self._sc_mid_rise_disp, self._sc_mid_fall_disp,
-                   self._sc_unmatched_rise, self._sc_unmatched_fall):
+                   self._sc_unmatched_rise, self._sc_unmatched_fall,
+                   self._sc_deleted, self._sc_selection):
             sc.setData(x=[], y=[])
         self._pair_connectors.setData(x=[], y=[])
         self._connector_excluded.setData(x=[], y=[])
@@ -425,6 +500,9 @@ class BrightnessGraphWidget(pg.PlotWidget):
         self._sc_highlight.setData(x=[], y=[])
         self._connector_highlight.setData(x=[], y=[])
         self._hover_line.setVisible(False)
+        if self._selection is not None:
+            self._selection = None
+            self.selection_changed.emit(None)
         self._update_playhead_pair_signal()
         self.domain_changed.emit(0.0, -1.0)
         self.pairs_updated.emit()
@@ -497,6 +575,176 @@ class BrightnessGraphWidget(pg.PlotWidget):
             uo += len(self._fall_orig_unmatched)
             ud += len(self._fall_disp_unmatched)
         return uo, ud
+
+    # ------------------------------------------------------- manual editing
+
+    def set_manual_edits(self, edits: list[ManualEdit]) -> None:
+        """Adopt MainWindow's edit list and re-run the pipeline against it.
+
+        MainWindow owns the list (it is what the sidecar stores); this is a
+        copy. A redetect follows because deletions change which transitions
+        pair, and overrides change what every metric reads."""
+        self._manual_edits = list(edits)
+        if self._orig_data is not None:
+            self._redetect()
+
+    def get_manual_edits(self) -> list[ManualEdit]:
+        return list(self._manual_edits)
+
+    def analysis_bounds(self) -> tuple[int, int]:
+        """Inclusive first/last frame of the analysed range — the limits a
+        marker may be nudged between."""
+        return self._in_point, self._in_point + max(0, self._n - 1)
+
+    def selection(self) -> EditTarget | None:
+        return self._selection
+
+    def set_selection(self, target: EditTarget | None) -> None:
+        if target == self._selection:
+            return
+        self._selection = target
+        self._update_selection_marker()
+        self.selection_changed.emit(self._selection)
+
+    def clear_selection(self) -> None:
+        self.set_selection(None)
+
+    def select_frame(self, frame: int, pos=None) -> bool:
+        """Select a marker drawn at `frame`. Returns False if there is none.
+
+        `pos` is an optional widget-local mouse position. X has already decided
+        the frame by the time this is called, so Y is used only to choose
+        between markers that sit on the SAME frame on the two traces — which are
+        far apart vertically, so this asks nothing of the user's aim that they
+        cannot answer by eye."""
+        candidates = self._frame_to_markers.get(frame)
+        if not candidates:
+            return False
+        if pos is None or len(candidates) == 1:
+            self.set_selection(candidates[0])
+            return True
+        best, best_dist = candidates[0], None
+        for target in candidates:
+            y = self._marker_y(target)
+            if y is None:
+                continue
+            widget_pt = self.mapFromScene(self._vb.mapViewToScene(QPointF(frame, y)))
+            dist = abs(widget_pt.y() - pos.y())
+            if best_dist is None or dist < best_dist:
+                best, best_dist = target, dist
+        self.set_selection(best)
+        return True
+
+    def _edges_for(self, roi: str) -> dict[int, TransitionEdge]:
+        return self._orig_edges if roi == "original" else self._disp_edges
+
+    def _auto_edges_for(self, roi: str) -> dict[int, TransitionEdge]:
+        return self._orig_auto_edges if roi == "original" else self._disp_auto_edges
+
+    def _data_for(self, roi: str) -> np.ndarray | None:
+        return self._orig_data if roi == "original" else self._disp_data
+
+    def edge_for(self, target: EditTarget) -> TransitionEdge | None:
+        """The transition's measured extent as currently reported — overrides
+        applied."""
+        return self._edges_for(target.roi).get(target.anchor_frame)
+
+    def resolved_frames(self, target: EditTarget) -> tuple[int, int] | None:
+        edge = self.edge_for(target)
+        return None if edge is None else (edge.first_frame, edge.full_frame)
+
+    def auto_frames(self, target: EditTarget) -> tuple[int, int] | None:
+        """What the algorithm measured, before the user moved anything. None
+        when this transition could not be characterized at all."""
+        edge = self._auto_edges_for(target.roi).get(target.anchor_frame)
+        return None if edge is None else (edge.first_frame, edge.full_frame)
+
+    def is_deleted(self, target: EditTarget) -> bool:
+        return any(
+            e.deleted and (e.roi, e.polarity, e.anchor_frame) == target.transition
+            for e in self._manual_edits
+        )
+
+    def marker_frame(self, target: EditTarget) -> int | None:
+        """The frame `target`'s marker is drawn at, or None if its transition is
+        no longer on the graph at all."""
+        if self.is_deleted(target):
+            for deleted, frame in self._deleted_targets():
+                if deleted.transition == target.transition:
+                    return frame
+            return None
+        edge = self.edge_for(target)
+        if edge is None:
+            anchors = self._anchors_for(target.roi, target.polarity)
+            return target.anchor_frame if target.anchor_frame in anchors else None
+        return edge.first_frame if target.which == "first" else edge.full_frame
+
+    def _anchors_for(self, roi: str, polarity: str) -> list[int]:
+        if roi == "original":
+            return self._rise_orig_frames if polarity == "rising" else self._fall_orig_frames
+        return self._rise_disp_frames if polarity == "rising" else self._fall_disp_frames
+
+    def _marker_y(self, target: EditTarget) -> float | None:
+        frame = self.marker_frame(target)
+        data = self._data_for(target.roi)
+        if frame is None or data is None:
+            return None
+        i = frame - self._in_point
+        if not (0 <= i < len(data)):
+            return None
+        return float(data[i])
+
+    def transition_position(self, target: EditTarget) -> tuple[int, int]:
+        """(1-based position, total) of `target`'s transition among the ones
+        Up/Down walks, so the edit panel can say how far through a review pass
+        the user is. A deleted transition returns position 0 — it is not one of
+        the stops."""
+        ordered = self._ordered_transitions()
+        total = len(ordered)
+        if self.is_deleted(target):
+            return 0, total
+        try:
+            return ordered.index(target.transition) + 1, total
+        except ValueError:
+            return 0, total
+
+    def _ordered_transitions(self) -> list[tuple[str, str, int]]:
+        """Every selectable, non-deleted transition in the visible polarities,
+        in the order the playhead meets them."""
+        show_r = self._polarity in ("both", "rising")
+        show_f = self._polarity in ("both", "falling")
+        out: list[tuple[int, tuple[str, str, int]]] = []
+        groups = []
+        if show_r:
+            groups += [("original", "rising", self._rise_orig_frames, self._orig_edges),
+                       ("display", "rising", self._rise_disp_frames, self._disp_edges)]
+        if show_f:
+            groups += [("original", "falling", self._fall_orig_frames, self._orig_edges),
+                       ("display", "falling", self._fall_disp_frames, self._disp_edges)]
+        for roi, polarity, anchors, edges in groups:
+            for anchor in anchors:
+                edge = edges.get(anchor)
+                frame = anchor if edge is None else edge.first_frame
+                out.append((frame, (roi, polarity, anchor)))
+        out.sort()
+        return [t for _, t in out]
+
+    def _update_selection_marker(self) -> None:
+        """Draw the selection ring, and drop a selection whose transition a
+        redetect has removed — a ring around nothing would be worse than no
+        ring, since the nudge keys would appear to do nothing."""
+        target = self._selection
+        if target is None or self._orig_data is None:
+            self._sc_selection.setData(x=[], y=[])
+            return
+        frame = self.marker_frame(target)
+        y = self._marker_y(target)
+        if frame is None or y is None:
+            self._sc_selection.setData(x=[], y=[])
+            self._selection = None
+            self.selection_changed.emit(None)
+            return
+        self._sc_selection.setData(x=[float(frame)], y=[y])
 
     # ------------------------------------------------------------------ mouse
 
@@ -600,6 +848,14 @@ class BrightnessGraphWidget(pg.PlotWidget):
                 if frame is None:
                     frame = self._hover_raw_frame
                 if frame is not None:
+                    # Selection follows the same snap the seek does: a click
+                    # that landed on a marker selects it, a click on bare graph
+                    # clears the selection rather than leaving a ring somewhere
+                    # the user is no longer looking.
+                    if self._click_target_frame is None or not self.select_frame(
+                        frame, event.position()
+                    ):
+                        self.clear_selection()
                     self.frame_clicked.emit(frame)
             event.accept()
             return
@@ -719,23 +975,56 @@ class BrightnessGraphWidget(pg.PlotWidget):
 
     def _redetect(self) -> None:
         sp = self._min_spacing
-        self._rise_orig_frames = apply_min_spacing(
+        rise_orig = apply_min_spacing(
             [self._in_point + i for i in find_rising(self._orig_data,  self._delta)], sp)
-        self._fall_orig_frames = apply_min_spacing(
+        fall_orig = apply_min_spacing(
             [self._in_point + i for i in find_falling(self._orig_data, self._delta)], sp)
-        self._rise_disp_frames = apply_min_spacing(
+        rise_disp = apply_min_spacing(
             [self._in_point + i for i in find_rising(self._disp_data,  self._delta)], sp)
-        self._fall_disp_frames = apply_min_spacing(
+        fall_disp = apply_min_spacing(
             [self._in_point + i for i in find_falling(self._disp_data, self._delta)], sp)
+        self._detected_anchors = {
+            ("original", "rising"): set(rise_orig),
+            ("original", "falling"): set(fall_orig),
+            ("display", "rising"): set(rise_disp),
+            ("display", "falling"): set(fall_disp),
+        }
+
+        # Re-resolve the user's edits onto this pass's anchors before anything
+        # keys on them, then drop the transitions they deleted. Deletion has to
+        # happen HERE, upstream of characterization: characterize_signal bounds
+        # each transition's search window at the midpoints to its neighbouring
+        # anchors, so a noise blip deleted any later than this would still be
+        # truncating the window of the real transition beside it.
+        edits = rebind(self._manual_edits, rise_orig, fall_orig, "original")
+        edits = rebind(edits, rise_disp, fall_disp, "display")
+        if edits != self._manual_edits:
+            self._manual_edits = edits
+            # Before pairs_updated, so MainWindow's handlers never see a list
+            # that disagrees with the pairs they are about to read.
+            self.manual_edits_rebound.emit(list(edits))
+
+        self._rise_orig_frames, self._fall_orig_frames = delete_anchors(
+            edits, rise_orig, fall_orig, "original")
+        self._rise_disp_frames, self._fall_disp_frames = delete_anchors(
+            edits, rise_disp, fall_disp, "display")
 
         # Characterize each located transition. Both polarities go in together:
         # each transition's search window is bounded by its neighbours of
         # EITHER polarity, since on a square wave the plateau after a rising
         # edge is terminated by the following falling edge.
-        self._orig_edges, self._orig_quality = self._characterize(
+        self._orig_auto_edges, self._orig_quality = self._characterize(
             self._orig_data, self._rise_orig_frames, self._fall_orig_frames)
-        self._disp_edges, self._disp_quality = self._characterize(
+        self._disp_auto_edges, self._disp_quality = self._characterize(
             self._disp_data, self._rise_disp_frames, self._fall_disp_frames)
+
+        # Overrides come last, so they cannot disturb anything upstream. The
+        # anchors are untouched and pairing keys on anchors, which is what
+        # guarantees that nudging a marker changes the reported milliseconds and
+        # nothing else — it can never silently re-pair a transition.
+        lo, hi = self._in_point, self._in_point + self._n - 1
+        self._orig_edges = apply_overrides(edits, self._orig_auto_edges, lo, hi, "original")
+        self._disp_edges = apply_overrides(edits, self._disp_auto_edges, lo, hi, "display")
 
         max_fr = self._max_latency if self._max_latency > 0 else None
         self._rise_pairs, self._rise_orig_unmatched, self._rise_disp_unmatched = \
@@ -805,6 +1094,52 @@ class BrightnessGraphWidget(pg.PlotWidget):
             for f in (edge.first_frame, edge.full_frame)
         }
 
+    def _manual_frames(self, anchors: list[int], edges: dict[int, TransitionEdge]) -> set[int]:
+        return {
+            f
+            for a in anchors
+            if (edge := edges.get(a)) is not None and edge.manual
+            for f in (edge.first_frame, edge.full_frame)
+        }
+
+    def _deleted_targets(self) -> list[tuple[EditTarget, int]]:
+        """(target, frame to draw at) for every transition the user has deleted
+        that detection actually found this pass. An edit whose anchor isn't in
+        the detected set is dormant — its transition isn't being detected at all
+        right now — and drawing a cross for it would claim something was removed
+        that was never there."""
+        out: list[tuple[EditTarget, int]] = []
+        for edit in self._manual_edits:
+            if not edit.deleted:
+                continue
+            if edit.anchor_frame not in self._detected_anchors.get(
+                (edit.roi, edit.polarity), ()
+            ):
+                continue
+            frame = edit.anchor_frame if edit.first_frame is None else edit.first_frame
+            out.append((
+                EditTarget(edit.roi, edit.polarity, edit.anchor_frame, "first"),
+                frame,
+            ))
+        return out
+
+    def _populate_deleted(self) -> None:
+        show_r = self._polarity in ("both", "rising")
+        show_f = self._polarity in ("both", "falling")
+        xs: list[float] = []
+        ys: list[float] = []
+        for target, frame in self._deleted_targets():
+            if target.polarity == "rising" and not show_r:
+                continue
+            if target.polarity == "falling" and not show_f:
+                continue
+            data = self._orig_data if target.roi == "original" else self._disp_data
+            if data is None or not (0 <= frame - self._in_point < len(data)):
+                continue
+            xs.append(float(frame))
+            ys.append(float(data[frame - self._in_point]))
+        self._sc_deleted.setData(x=xs, y=ys)
+
     def _interp_y(self, data: np.ndarray, frame: float) -> float:
         """Brightness at a fractional frame, linearly interpolated. Only the
         midpoint dots need this — every other marker sits on a real sample."""
@@ -861,8 +1196,10 @@ class BrightnessGraphWidget(pg.PlotWidget):
             self._populate(
                 self._edge_frames(anchors, edges), data, tri, brush,
                 excluded, self._flagged_frames(anchors, edges),
+                self._manual_frames(anchors, edges),
             )
             self._populate_mid(anchors, edges, data, mid)
+        self._populate_deleted()
 
     def _apply_polarity(self) -> None:
         show_r = self._polarity in ("both", "rising")
@@ -928,10 +1265,58 @@ class BrightnessGraphWidget(pg.PlotWidget):
                 self._orig_marker_frames.add(frame)
             for frame in self._pair_frames(p, orig=False):
                 self._frame_to_pair[frame] = p
+        self._rebuild_marker_index()
         self._update_marker_highlight()
+        self._update_selection_marker()
         self._update_playhead_pair_signal()
 
         self.pairs_updated.emit()
+
+    def _rebuild_marker_index(self) -> None:
+        """frame -> the transition ends drawn there, for click-to-select.
+
+        The visit order below fixes the tie-break when two markers land on the
+        same frame: original before display, rising before falling, first-light
+        before fully-lit. It has to be deterministic rather than merely
+        sensible — clicking the same pixel twice must select the same thing."""
+        show_r = self._polarity in ("both", "rising")
+        show_f = self._polarity in ("both", "falling")
+        index: dict[int, list[EditTarget]] = {}
+
+        def add(frame: int, target: EditTarget) -> None:
+            index.setdefault(frame, []).append(target)
+
+        groups = []
+        if show_r:
+            groups.append(("original", "rising", self._rise_orig_frames, self._orig_edges))
+            groups.append(("display", "rising", self._rise_disp_frames, self._disp_edges))
+        if show_f:
+            groups.append(("original", "falling", self._fall_orig_frames, self._orig_edges))
+            groups.append(("display", "falling", self._fall_disp_frames, self._disp_edges))
+        # Sorted so "original before display" holds regardless of the append
+        # order above, and rising before falling within a signal.
+        for roi, polarity, anchors, edges in sorted(
+            groups, key=lambda g: (g[0] != "original", g[1] != "rising")
+        ):
+            for anchor in anchors:
+                edge = edges.get(anchor)
+                if edge is None:
+                    # Not characterizable, but still a real transition the user
+                    # may want to delete — reachable at its anchor.
+                    add(anchor, EditTarget(roi, polarity, anchor, "first"))
+                    continue
+                add(edge.first_frame, EditTarget(roi, polarity, anchor, "first"))
+                if edge.full_frame != edge.first_frame:
+                    add(edge.full_frame, EditTarget(roi, polarity, anchor, "full"))
+
+        for target, frame in self._deleted_targets():
+            if target.polarity == "rising" and not show_r:
+                continue
+            if target.polarity == "falling" and not show_f:
+                continue
+            add(frame, target)
+
+        self._frame_to_markers = index
 
     def _pair_frames(self, pair: LatencyPair, *, orig: bool) -> list[int]:
         """One end of a pair's marker frames: first-light and fully-lit, or just
@@ -955,6 +1340,7 @@ class BrightnessGraphWidget(pg.PlotWidget):
         normal_brush: tuple[int, int, int] | None = None,
         excluded_frames: frozenset[int] = frozenset(),
         flagged_frames: set[int] | frozenset[int] = frozenset(),
+        manual_frames: set[int] | frozenset[int] = frozenset(),
     ) -> None:
         if not frame_list:
             item.setData(x=[], y=[])
@@ -969,11 +1355,20 @@ class BrightnessGraphWidget(pg.PlotWidget):
         # Per-point pens, same mechanism as the per-point brushes above. Clean
         # points get an explicit empty pen rather than being left out, because
         # a list has to cover every point.
-        if flagged_frames:
-            kwargs["pen"] = [
-                pg.mkPen(_WARN_OUTLINE, width=1.5) if f in flagged_frames else pg.mkPen(None)
-                for f in frame_list
-            ]
+        #
+        # Manual outranks flagged where a marker would carry both: the warnings
+        # that survive an override describe the SIGNAL, and the outline here is
+        # answering "did a person place this point", which is the more useful
+        # thing to know at a glance while reviewing.
+        if flagged_frames or manual_frames:
+            def pen_for(f):
+                if f in manual_frames:
+                    return pg.mkPen(_MANUAL_OUTLINE, width=1.5)
+                if f in flagged_frames:
+                    return pg.mkPen(_WARN_OUTLINE, width=1.5)
+                return pg.mkPen(None)
+
+            kwargs["pen"] = [pen_for(f) for f in frame_list]
         # Omitting brush=/pen= entirely falls back to the item's own
         # construction-time defaults, which is how a redetect implicitly resets
         # excluded and flagged styling.

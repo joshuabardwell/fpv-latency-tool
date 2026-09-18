@@ -29,6 +29,11 @@ core/
   edges.py                TransitionEdge: measures each transition's extent
                           (first-light / fully-lit) + quality checks
   latency.py              LatencyPair + pair_transitions (greedy matching)
+  manual.py               ManualEdit: the user's own placement of a transition,
+                          overriding detection; bound to a transition, not a
+                          list position, so it survives parameter changes
+  session.py              <video>.latency.json sidecar: every parameter plus
+                          every manual edit, read/written per clip
   export.py               CSV export of latency pairs (stdlib csv)
   view_range.py            pure clamp/center/zoom/pan math for graph zoom
 ui/
@@ -37,6 +42,8 @@ ui/
   brightness_graph.py     BrightnessGraphWidget: traces, detection, pair markers
   timeline.py             TimelineWidget: playhead + draggable in/out handles
   zoom_bar.py              ZoomBarWidget: graph zoom/pan bar above the timeline
+  edit_panel.py           TransitionEditPanel: the selected marker's state, and
+                          the mouse equivalent of every editing keystroke
 ```
 
 `core/` has no Qt-widget dependencies beyond `extractor.py`'s QThread and is
@@ -44,9 +51,12 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
 
 ## Data flow
 
-1. **Load** — `MainWindow.open_file` builds a `VideoReader`. Scrubbing calls
-   `read_frame(index)`; seeks use `CAP_PROP_POS_FRAMES` (frame-index, not
-   time-based — time seeks are not reliably frame-accurate in OpenCV/ffmpeg).
+1. **Load** — `MainWindow.open_file` builds a `VideoReader`, then restores the
+   clip's `<video>.latency.json` sidecar if it has one (parameters, ROIs,
+   in/out points and manual edits — see "The settings sidecar" below).
+   Scrubbing calls `read_frame(index)`; seeks use `CAP_PROP_POS_FRAMES`
+   (frame-index, not time-based — time seeks are not reliably frame-accurate in
+   OpenCV/ffmpeg).
 2. **ROI selection** — user drags rectangles on `RoiFrameView`; it emits
    `roi_changed(name, ROI)` in *original-frame pixel coordinates*. A live
    mean-brightness readout is recomputed per scrubbed frame.
@@ -60,6 +70,9 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    `core.detection`: `np.diff` against a delta threshold, consecutive
    over-threshold frames collapsed to the steepest step. Detection re-runs live
    when the user changes Min ΔBrightness, Min Spacing, or Max Latency.
+   `core.manual` then re-binds the user's edits onto the fresh anchors and
+   removes the transitions they deleted, before characterization; their moved
+   frames are applied after it (see "Manual transition editing" below).
 5. **Pairing** — `pair_transitions` greedily matches each original transition to
    the nearest display transition at or after it (same polarity: rising with
    rising, falling with falling), one-to-one, optionally capped by Max Latency.
@@ -73,8 +86,10 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    the per-direction "Show Excluded" filter, and "Clear All" are all
    independent between the rise and fall panels. Exclusion has no identity
    across a redetect — pairs are keyed only by their position in the current
-   list, not a stable id — so any threshold change or new Analyze run clears
-   all exclusions for both directions. `MainWindow` owns the exclude sets;
+   list, not a stable id — so it is dropped whenever the list of pairs itself
+   changes, and unconditionally on a new Analyze run (see "Exclusions are now
+   cleared by the pairs changing" below; a manual nudge provably cannot change
+   the pairs, and deliberately keeps them). `MainWindow` owns the exclude sets;
    `BrightnessGraphWidget.set_excluded_pairs()` is a pure rendering hint
    (mutes the matched marker/connector color for excluded pairs) and must
    never emit `pairs_updated`, or it would immediately clear the sets it was
@@ -455,6 +470,190 @@ These are properties of stage 1 and are unchanged:
   "Auto" button next to the spinbox recomputes and re-applies that value
   on demand; the click itself counts as a user edit, so it's a one-time
   snap rather than a standing auto mode.
+
+## Manual transition editing
+
+Detection and characterization are heuristics, and across real-world footage the
+conclusion was that neither can be made reliable on noisy signals by tuning
+alone: parameters that read a clean clip correctly produce false edges on a
+dirty one, and the fix is not more knobs. The tool makes a first pass; the user
+walks the transitions, checks each against the video, and corrects what is
+wrong. **A user decision outranks any automatic value and survives every
+parameter change.**
+
+`core/manual.py` holds the whole concept, Qt-free and NumPy-free. `core/edges.py`
+and `core/detection.py` know nothing about it — with no edits present the
+pipeline produces exactly the numbers it produced before manual editing existed,
+which is what keeps identical footage and settings reproducible.
+
+### Where the two kinds of edit are applied, and why not together
+
+    find_rising/find_falling -> apply_min_spacing
+      -> rebind -> delete_anchors        <- deletions, BEFORE characterization
+      -> characterize_signal
+      -> apply_overrides                 <- moved frames, AFTER characterization
+      -> pair_transitions
+
+**Deletions must come first.** `characterize_signal` bounds each transition's
+search window at the midpoints to its *neighbouring anchors*, so a noise blip
+located as a transition truncates the window of the real transition beside it —
+the survivor's fully-lit scan stops mid-ramp. Deleting the blip any later would
+leave that damage in place. `tests/test_manual.py` pins this with a synthetic
+ramp whose measured `full_frame` moves once the blip beside it is deleted.
+
+**Overrides must come last,** where they cannot disturb anything upstream.
+`anchor_frame` is never touched and pairing keys on anchors, so nudging a marker
+changes the reported milliseconds and nothing else — it can never silently
+re-pair a transition. Deleting one removes an anchor and therefore does re-pair,
+which is exactly what it is for: greedy `pair_transitions` matches the *first*
+following display transition, so a false read beside a real one steals its match
+until the false read is gone.
+
+### Identity: an edit is bound to a transition, not to a position
+
+Exclusions are positions in a list and have no identity across a redetect. Manual
+edits cannot work that way — a review pass is too much work to lose to a slider
+nudge — so `rebind` re-resolves each edit onto the current anchors before
+anything reads it, taking the nearest same-ROI same-polarity anchor within
+`REBIND_WINDOW_FRAMES`, one-to-one, nearest first with ties broken to the lower
+frame (so the result never depends on the order the user made the edits in). The
+edit's recorded `anchor_frame` is rewritten to whatever it bound to, so a series
+of small parameter changes *tracks* the transition instead of drifting out of the
+window.
+
+Anchors do not move at all when Edge Sensitivity or Max Latency change — neither
+reaches `core/detection.py` — and move a frame or two under Min ΔBrightness or
+Min Spacing, since the steepest step stays where it is and only the run collapsed
+around it grows.
+
+An edit that finds no anchor is left **dormant, not discarded**: its transition
+is not currently being detected, but raising Min Δ and lowering it again must
+bring the user's decision back rather than silently losing it. A dormant deletion
+draws nothing — a cross where detection found nothing this pass would claim
+something was removed that was never there.
+
+`BrightnessGraphWidget` owns the rebinding (it is where the anchor lists live)
+and hands the updated list back through `manual_edits_rebound`. MainWindow, which
+owns the authoritative list, must only **store** what arrives there; calling
+`set_manual_edits` in response would re-enter the redetect that produced it — the
+same non-reentrancy rule that already governs `set_excluded_pairs`.
+
+### Nudging pushes; it does not block
+
+`_characterize_one` clamps both frames to the anchor, so on an instantaneous
+transition — the normal shape for an LED source — `first_frame == full_frame`.
+`_edge_frames` collapses them into a set and `_populate_mid` draws no midpoint
+dot, so the graph shows **one** triangle there.
+
+Blocking at `first <= full` would therefore make "nudge first-light right" and
+"nudge fully-lit left" dead keys on the most ordinary transition there is.
+Instead `set_frame` pushes: raising first-light past fully-lit carries fully-lit
+along, and vice versa. On a coincident marker that moves the whole transition,
+which is what someone looking at a single triangle means by nudging it. The edit
+panel shows both frame numbers at all times so a push is never invisible, and the
+status line names it.
+
+**Both ends are pinned once either is touched.** Leaving the untouched end
+tracking the algorithm would let it move on its own at the next parameter change,
+which is not something "the user's decision is authoritative" can be allowed to
+mean. Reset restores both together.
+
+### Which warnings survive an override
+
+`slow-ramp` and `ambiguous-edge` are dropped; `low-snr` and `unsteady-level` are
+kept. The first two describe how confident the *automatic reading* was about
+*where the edge lay*, and that reading no longer exists once a person has said
+where it is — leaving them would be crying wolf about a question already
+answered. The last two describe the signal itself and are just as true
+afterwards. The ✎ column is what tells a reader a human placed the point; it sits
+beside ⚠ rather than replacing it, because a pair can carry both and they answer
+different questions.
+
+### Exclusions are now cleared by the pairs changing, not by the signal firing
+
+`_on_pairs_rebuilt` used to clear both exclusion sets on every `pairs_updated`.
+It now compares a signature of the pair list — `(orig_frame, disp_frame)` per
+pair, per direction — and clears only when that actually changed.
+
+This is required, not a tidy-up: a nudge re-runs the pipeline but provably cannot
+re-pair anything, so the old rule would have wiped the user's Exclude ticks on
+every keypress and made the two features unusable together. A deletion, a
+threshold change that moves anchors, and a fresh Analyze all still clear —
+Analyze unconditionally, by resetting the signature at click time, since it is an
+explicit "start this measurement over" even when the pairs come out identical. It
+also fixes an existing wart: changing Edge Sensitivity used to clear exclusions
+despite pairing being unchanged.
+
+### Selection is independent of the playhead
+
+The playhead is where the user is *looking*; the selection is what they are
+*editing*. Keeping them separate is what makes the loop work — stepping a frame
+either side of a marker to judge it must not cost the user their hold on it, so
+plain Left/Right stay pure playhead stepping and are the verification keys.
+
+An `EditTarget` is `(roi, polarity, anchor_frame, which)`. It addresses the
+transition by anchor rather than by the frame its marker sits on, because nudging
+moves the marker and a selection that lost track of its transition the moment it
+moved would be useless.
+
+Up/Down select the marker they land on. Without that, every transition would need
+a mouse trip to the graph before it could be nudged, which breaks the one flow
+the feature exists for. Clicking a marker selects it (reusing the snap that
+click-to-seek already does), clicking bare graph clears the selection, and
+clicking a results row selects that pair's marker.
+
+Hit-testing stays **X-first**, for the reason given under Graph zoom/pan: the
+real cursor is blanked while the hover line shows, so the user cannot aim by Y. Y
+is used only to break a tie between markers on the *same* frame on the two
+traces, which are far apart vertically. Where `first == full` the two ends are
+indistinguishable by position, so a click selects first-light and Shift+↑/↓ is
+how the other end is reached — vertical keys choose *which* point, horizontal
+keys *move* it.
+
+A deleted transition stays drawn (a dim grey ×) and stays selectable. A deletion
+the user cannot see is one they cannot check, and one they cannot select is one
+they cannot undo. It is excluded from pairing, from Up/Down navigation and from
+the unmatched list.
+
+## The settings sidecar
+
+`<video>.latency.json`, written beside the clip. `core/session.py`.
+
+A review pass is real work, so it is saved, along with every analysis parameter,
+and restored when the clip is reopened. `SessionState` carries the **same field
+names as the argparse namespace** in `main()`, so a restored session and a
+command line are applied by one code path (`MainWindow._apply_settings`) and
+cannot drift apart in what they mean. That is also what makes the precedence rule
+one sentence: `main()` calls `open_file` (which reads the sidecar) before
+`apply_cli_args`, so a flag the user typed wins and a flag they omitted comes
+from the sidecar. `--no-sidecar` turns the mechanism off entirely, and must be
+applied before `open_file` — `apply_cli_args` runs too late to suppress a read
+that has already happened.
+
+Restoring deliberately does **not** start an analysis. Extraction is a full
+decode pass, and kicking one off unasked would lock the UI for as long as the
+clip is, every time the file is opened.
+
+Saving is automatic and debounced, but gated on a completed analysis, so merely
+opening and scrubbing footage never drops files beside it. Writes go through a
+temp file and an atomic replace, since this runs on every nudge and an
+interrupted write must not leave a half-written file where a valid one was. An
+`OSError` — read-only card, full disk, vanished network share — is reported in
+the status line and otherwise ignored: the measurement is unaffected, and a
+dialog mid-review would not be.
+
+Reading is total. A missing, unreadable, truncated, malformed or
+future-versioned file yields `None` and the clip opens with normal defaults; a
+single malformed manual edit is skipped rather than costing the user their ROIs.
+A settings file is a convenience, and no convenience gets to stop a measurement
+tool from opening footage.
+
+A restored `min_delta` or `max_latency` sets the existing *user-set* flags, or
+the auto-computation at the end of extraction would overwrite the saved value.
+
+The per-pair Exclude checkboxes are deliberately **not** persisted. They have no
+stable identity (see above), and giving them one is a separate redesign rather
+than something to bolt on here.
 
 ## Frame-accuracy caveats
 

@@ -113,6 +113,11 @@ class TransitionEdge:
     snr: float                 # amplitude / local sigma; inf when sigma is 0
     crossings: int             # band crossings in the window; 1 is clean
     warnings: tuple[str, ...] = ()
+    # Set by core.manual when the user has placed this edge by hand. Nothing in
+    # this module ever sets it: characterization does not know or care that
+    # manual editing exists, and a run with no edits produces exactly the edges
+    # it produced before manual editing was added.
+    manual: bool = False
 
     @property
     def amplitude(self) -> float:
