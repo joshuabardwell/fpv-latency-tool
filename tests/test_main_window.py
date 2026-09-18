@@ -502,6 +502,44 @@ class TestKeyboardNavigation:
         assert loaded.fps_spin.value() == pytest.approx(fps_before + 1.0)
         assert loaded.timeline.current_frame == before_frame
 
+    @pytest.mark.parametrize("spin_attr", [
+        "fps_spin", "delta_spin", "spacing_spin", "max_latency_spin",
+        "known_period_spin",
+    ])
+    @pytest.mark.parametrize("target_attr", ["brightness_graph", "timeline", "frame_view"])
+    def test_click_away_releases_focus_from_every_spinbox(
+        self, loaded, qtbot, spin_attr, target_attr,
+    ):
+        """Regression: every detection-parameter spinbox needs ClickFocus for
+        its own arrow/Home/End editing, but Qt never reclaims that focus on
+        its own -- the graph, timeline and video preview are all NoFocus
+        precisely so they don't steal it back, so nothing ever released a
+        spinbox once it had focus. It went on swallowing every navigation key
+        (plain arrows, Home/End, etc.) until the user manually tabbed away or
+        committed the value with Enter/Escape. Fixed for Max Latency alone
+        first; min spacing turned out to have the identical bug, which is why
+        this is parametrized over every such spinbox and every click target
+        rather than just the one pair that was originally reported.
+
+        Deliberately doesn't assert on the target widget's own focusPolicy
+        (unlike the fix's first attempt): a composite widget's internal
+        parts, e.g. a QAbstractScrollArea's viewport, can report a stronger
+        nominal policy than the widget it belongs to even though that
+        widget's own overridden mouse handling means the policy is never
+        actually acted on -- which is exactly what let the min-spacing case
+        slip through the first fix."""
+        analyze(loaded, qtbot)
+        spin = getattr(loaded, spin_attr)
+        spin.setFocus()
+        assert spin.hasFocus()
+        target = getattr(loaded, target_attr)
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton)
+        assert not spin.hasFocus()
+        before = loaded.timeline.current_frame
+        focused = loaded.focusWidget() or loaded
+        qtbot.keyClick(focused, Qt.Key.Key_Right)
+        assert loaded.timeline.current_frame == before + 1
+
     def test_in_out_marking(self, loaded, qtbot):
         loaded.show_frame(15)
         qtbot.keyClick(loaded, Qt.Key.Key_I)
