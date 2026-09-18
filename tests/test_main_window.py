@@ -14,9 +14,14 @@ import pytest
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
+from core.edges import (TransitionEdge, W_AMBIGUOUS_EDGE, W_LOW_SNR,
+                        W_UNSTEADY_LEVEL)
+from core.latency import LatencyPair
 from core.roi import ROI
+from core.session import load_session, sidecar_path_for
 from tests.conftest import SYNTH_LATENCY, SYNTH_W, SYNTH_H
-from ui.main_window import MainWindow, _existing_file
+from ui.main_window import (COL_DISP_FIRST, COL_ORIG_FIRST, SUMMARY_METRICS,
+                            WARNING_TEXT, MainWindow, _existing_file)
 
 ROI_ORIG = ROI(2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
 ROI_DISP = ROI(SYNTH_W // 2 + 2, 2, SYNTH_W // 2 - 4, SYNTH_H - 4)
@@ -69,19 +74,26 @@ class TestAnalysisLifecycle:
         always be visible, showing a placeholder rather than being blank
         when nothing is loaded."""
         for model in (window._rise_summary_model, window._fall_summary_model):
-            assert [model.headerData(c, Qt.Orientation.Horizontal) for c in range(4)] == \
-                ["Mean", "Min", "Max", "Median"]
-            assert [model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+            assert [model.headerData(c, Qt.Orientation.Horizontal) for c in range(5)] == \
+                ["Metric", "Mean", "Min", "Max", "Median"]
+            assert model.rowCount() == len(SUMMARY_METRICS)
+            for row, (label, _) in enumerate(SUMMARY_METRICS):
+                assert model.item(row, 0).text() == label
+                assert [model.item(row, c).text() for c in range(1, 5)] == ["--.- ms"] * 4
 
     def test_summary_tables_populated_after_analysis(self, loaded, qtbot):
+        """The synthetic clip's transitions are instantaneous, so first = full =
+        anchor and all three metric rows report the same number as the tool did
+        before the metrics were split apart."""
         analyze(loaded, qtbot)
         fps = loaded.reader.fps_effective
         rise_pairs = loaded.brightness_graph.get_pairs_for("rising")
         fall_pairs = loaded.brightness_graph.get_pairs_for("falling")
         rise_expected = f"{rise_pairs[0].delta_ms(fps):.1f} ms"
         fall_expected = f"{fall_pairs[0].delta_ms(fps):.1f} ms"
-        assert [loaded._rise_summary_model.item(0, c).text() for c in range(4)] == [rise_expected] * 4
-        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == [fall_expected] * 4
+        for row in range(len(SUMMARY_METRICS)):
+            assert [loaded._rise_summary_model.item(row, c).text() for c in range(1, 5)] == [rise_expected] * 4
+            assert [loaded._fall_summary_model.item(row, c).text() for c in range(1, 5)] == [fall_expected] * 4
 
     def test_analysis_finds_known_latency(self, loaded, qtbot):
         analyze(loaded, qtbot)
@@ -130,7 +142,8 @@ class TestAnalysisLifecycle:
         assert loaded.fall_results_container.isVisible()
         assert loaded._rise_results_model.rowCount() == 1
         assert loaded._fall_results_model.rowCount() == 0
-        assert [loaded._fall_summary_model.item(0, c).text() for c in range(4)] == ["--.- ms"] * 4
+        for row in range(len(SUMMARY_METRICS)):
+            assert [loaded._fall_summary_model.item(row, c).text() for c in range(1, 5)] == ["--.- ms"] * 4
 
     def test_results_panel_pinned_until_next_analyze(self, loaded, qtbot):
         """Regression: the results panel content must stay pinned to the
@@ -173,7 +186,8 @@ class TestAnalysisLifecycle:
 
     def test_results_table_headers(self, window):
         """Regression: columns used to label orig_frame 'Display Frame'."""
-        expected = ["Exclude", "Original Frame", "Display Frame", "Latency (fr)", "Latency (ms)"]
+        expected = ["Exclude", "⚠", "✎", "Original\n1st Pixel", "Display\n1st Pixel",
+                    "First (ms)", "Avg (ms)", "Full (ms)"]
         for model in (window._rise_results_model, window._fall_results_model):
             headers = [
                 model.headerData(c, Qt.Orientation.Horizontal)
@@ -440,7 +454,7 @@ class TestCliCommand:
         args = SimpleNamespace(
             fps=None, direction=None,
             roi_original=(5000, 5000, 100, 100), roi_display=None,
-            min_delta=None, min_spacing=None, max_latency=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
             in_point=None, out_point=None,
         )
         loaded.apply_cli_args(args)
@@ -452,7 +466,7 @@ class TestCliCommand:
         args = SimpleNamespace(
             fps=None, direction=None,
             roi_original=None, roi_display=None,
-            min_delta=None, min_spacing=None, max_latency=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
             in_point=30, out_point=20,
         )
         loaded.apply_cli_args(args)
@@ -755,10 +769,12 @@ class TestExcludePairs:
         # Exclude the 6-frame outlier (row 2).
         loaded._rise_results_model.item(2, loaded._exclude_col).setCheckState(Qt.CheckState.Checked)
 
-        remaining_ms = [p.delta_ms(fps) for p in rise_pairs[:2]]
-        assert loaded._rise_summary_model.item(0, 0).text() == \
+        # Column 0 is the metric name now, so the stats start at column 1.
+        remaining_ms = [p.avg_delta_ms(fps) for p in rise_pairs[:2]]
+        avg_row = [m for m, _ in SUMMARY_METRICS].index("Average")
+        assert loaded._rise_summary_model.item(avg_row, 1).text() == \
             f"{sum(remaining_ms) / len(remaining_ms):.1f} ms"
-        assert loaded._rise_summary_model.item(0, 2).text() == f"{max(remaining_ms):.1f} ms"
+        assert loaded._rise_summary_model.item(avg_row, 3).text() == f"{max(remaining_ms):.1f} ms"
 
     def test_excluded_row_stays_visible_and_checked_in_normal_view(self, loaded):
         load_multi_pairs(loaded)
@@ -984,3 +1000,655 @@ class TestGraphClickToSeek:
         target = loaded.brightness_graph._rise_pairs[0].orig_frame
         loaded.brightness_graph.frame_clicked.emit(target)
         assert loaded.timeline.current_frame == target
+
+
+def _drifting_arrays():
+    """Six flash cycles whose dark level climbs steadily, as it would if the
+    display slowly moved within an oversized ROI. Amplitude is constant, so
+    only the baseline check should fire."""
+    out = []
+    for c in range(6):
+        base = 20.0 + c * 30.0
+        out.append(np.full(8, base))
+        out.append(np.full(8, base + 200.0))
+    arr = np.concatenate(out).astype(np.float64)
+    return arr, arr.copy()
+
+
+def _per_pair_flagged_arrays():
+    """Each dark stretch tilts steadily upward instead of sitting flat, so the
+    region every transition measures its baseline from is not a level. That
+    trips the per-transition `unsteady-level` check.
+
+    Distinct from _drifting_arrays on purpose: under pure drift each transition
+    is still locally well-measured, so the SIGNAL is flagged but no individual
+    pair is. Here it is the individual measurements that are suspect. The tilt's
+    per-frame steps stay well under the auto delta, so detection still finds
+    exactly one transition per edge."""
+    out = []
+    for _ in range(4):
+        out.append(np.linspace(20.0, 100.0, 10))
+        out.append(np.full(10, 220.0))
+    arr = np.concatenate(out).astype(np.float64)
+    return arr, arr.copy()
+
+
+def _asymmetric_ramp_arrays():
+    """Mirrors the real LED: one partially-lit frame, then a hard step. The
+    steepest single-frame change is the second one, so the anchor lands a frame
+    AFTER first-light — on the real clip 2.7 -> 84.2 -> 217.4 gave anchor 1153
+    with first-light at 1152. A symmetric ramp cannot show this, because its
+    steepest step is its first."""
+    def shape(delay):
+        d = np.full(40, 20.0)
+        d[10 + delay] = 84.0
+        d[11 + delay : 26 + delay] = 220.0
+        d[26 + delay] = 84.0
+        d[27 + delay :] = 20.0
+        return d
+    return shape(0), shape(3)
+
+
+def _ramped_arrays():
+    """Transitions that take several frames, so the three metrics differ."""
+    def shape(delay):
+        d = np.full(60, 20.0)
+        for start in (10, 34):
+            d[start + delay : start + 4 + delay] = [70.0, 120.0, 170.0, 210.0]
+            d[start + 4 + delay : start + 12 + delay] = 220.0
+            d[start + 12 + delay : start + 16 + delay] = [170.0, 120.0, 70.0, 30.0]
+        return d
+    return shape(0), shape(3)
+
+
+class TestThreeMetricColumns:
+    def test_row_carries_all_three_metrics(self, loaded):
+        orig, disp = _ramped_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        fps = loaded.reader.fps_effective
+        pair = loaded.brightness_graph.get_pairs_for("rising", active="both")[0]
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row["First (ms)"] == f"{pair.first_delta_ms(fps):.1f}"
+        assert row["Avg (ms)"] == f"{pair.avg_delta_ms(fps):.1f}"
+        assert row["Full (ms)"] == f"{pair.full_delta_ms(fps):.1f}"
+
+    def test_frame_columns_hold_first_pixel_not_the_anchor(self, loaded):
+        """The frame columns used to show the steepest-step anchor, which is an
+        internal matching detail — not drawn on the graph, not one of the three
+        reported metrics, and not where Up/Down navigation lands. On real
+        footage that made the column read 1153 where first-pixel was 1152."""
+        orig, disp = _asymmetric_ramp_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        pair = loaded.brightness_graph.get_pairs_for("rising", active="both")[0]
+        assert pair.orig_first_frame() != pair.orig_frame,             "fixture must ramp, or this asserts nothing"
+
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row[COL_ORIG_FIRST] == str(pair.orig_first_frame())
+        assert row[COL_DISP_FIRST] == str(pair.disp_first_frame())
+
+    def test_headers_do_not_bold_only_the_populated_panel(self, loaded, qtbot):
+        """Qt bolds the header section holding the current item, so a panel
+        with rows rendered bold while an empty one didn't — reading as a
+        deliberate distinction that was never intended."""
+        analyze(loaded, qtbot)
+        for name in ("rise_results_table", "fall_results_table"):
+            header = getattr(loaded, name).horizontalHeader()
+            assert not header.highlightSections()
+
+    def test_instantaneous_clip_reports_the_same_number_three_times(self, loaded, qtbot):
+        """Compatibility check on the real synthetic clip: square-wave
+        transitions make first = full = anchor, so the tool still reports
+        exactly what it did before the metrics were split apart."""
+        analyze(loaded, qtbot)
+        fps = loaded.reader.fps_effective
+        pair = loaded.brightness_graph.get_pairs_for("rising")[0]
+        expected = f"{SYNTH_LATENCY / fps * 1000.0:.1f}"
+        model = loaded._rise_results_model
+        headers = [model.headerData(c, Qt.Orientation.Horizontal)
+                   for c in range(model.columnCount())]
+        row = {h: model.item(0, c).text() for c, h in enumerate(headers)}
+        assert row["First (ms)"] == row["Avg (ms)"] == row["Full (ms)"] == expected
+
+
+class TestQualityBanner:
+    def test_hidden_for_a_clean_clip(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert not loaded.quality_label.isVisible()
+        assert loaded.quality_label.text() == ""
+
+    def _load(self, win, arrays):
+        orig, disp = arrays
+        win.brightness_graph.set_data(orig, disp, in_point=0)
+        win._results_polarity = "both"
+        win._update_results_table()
+        return win.quality_label.text()
+
+    def test_drift_with_clean_measurements_reads_as_information(self, loaded):
+        """Regression, and the shape of the real reference clip: the Display
+        baseline moved across the whole clip while every pair still measured
+        correctly. The banner used to raise a warning and tell the user to
+        re-draw their ROI. Both were wrong — a warning on a correct measurement
+        is one the user learns to skip, and the tool cannot know the cause."""
+        text = self._load(loaded, _drifting_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        assert all(p.is_clean() for p in pairs), "fixture should measure cleanly"
+
+        assert loaded.quality_label.isVisible()
+        assert "⚠" not in text
+        assert "baseline varies" in text
+        assert "auto-exposure" in text  # offered as explanation, not diagnosis
+
+    def test_information_register_never_blames_the_roi(self, loaded):
+        """The signature of a moving baseline is identical whether it comes
+        from auto-exposure on the device under test, ROI framing, changing
+        light or a nudged camera. Asserting one of them sends the user to the
+        wrong place — on the reference clip, to re-frame an ROI that measured
+        89% participating."""
+        text = self._load(loaded, _drifting_arrays()).lower()
+        for blame in ("re-draw", "stays inside", "check that each roi"):
+            assert blame not in text
+
+    def test_flagged_measurements_read_as_a_warning(self, loaded):
+        text = self._load(loaded, _per_pair_flagged_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        assert any(not p.is_clean() for p in pairs), "fixture should flag pairs"
+
+        assert "⚠" in text
+        assert "pairs flagged" in text
+        # Readable labels, not the raw slugs, and lower-cased mid-sentence.
+        assert not any(slug in text for slug in WARNING_TEXT)
+        assert any(label.lower() in text
+                   for label, _ in WARNING_TEXT.values())
+
+    def test_roi_framing_is_only_suggested_for_low_snr(self, loaded):
+        """low-snr is the one flag where framing genuinely is implicated: too
+        little of the screen inside the box leaves the step in the noise."""
+        from core.edges import W_LOW_SNR
+
+        text = self._load(loaded, _per_pair_flagged_arrays())
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        has_low_snr = any(W_LOW_SNR in p.quality_warnings() for p in pairs)
+        assert ("too little of its screen" in text) == has_low_snr
+
+    def test_warning_column_marks_flagged_rows_with_a_tooltip(self, loaded):
+        orig, disp = _per_pair_flagged_arrays()
+        loaded.brightness_graph.set_data(orig, disp, in_point=0)
+        loaded._results_polarity = "both"
+        loaded._update_results_table()
+
+        pairs = loaded.brightness_graph.get_pairs_for("rising", active="both")
+        flagged = [i for i, p in enumerate(pairs) if not p.is_clean()]
+        assert flagged, "expected the drifting signal to flag at least one pair"
+        item = loaded._rise_results_model.item(flagged[0], loaded._warn_col)
+        assert item.text() == "⚠"
+
+        # Explains what was seen rather than naming the check that fired:
+        # "unsteady-level" tells a reader of the code what happened and tells a
+        # user of the app nothing.
+        tip = item.toolTip()
+        assert "unsteady-level" not in tip
+        label, explanation = WARNING_TEXT[W_UNSTEADY_LEVEL]
+        assert tip.startswith(label)
+        assert explanation in tip
+
+    def test_tooltip_lists_every_flag_on_its_own_line(self, loaded):
+        pair = LatencyPair(
+            10, 13, "rising",
+            orig_edge=TransitionEdge(
+                anchor_frame=10, first_frame=10, full_frame=10,
+                baseline=20.0, plateau=220.0, polarity="rising",
+                snr=1.0, crossings=3,
+                warnings=(W_LOW_SNR, W_AMBIGUOUS_EDGE)),
+        )
+        model = loaded._rise_results_model
+        loaded._populate_results_model(model, [pair], 240.0, set())
+        tip = model.item(0, loaded._warn_col).toolTip()
+        assert len(tip.splitlines()) == 2
+        assert tip.splitlines()[0].startswith(WARNING_TEXT[W_LOW_SNR][0])
+        assert tip.splitlines()[1].startswith(WARNING_TEXT[W_AMBIGUOUS_EDGE][0])
+
+    def test_every_warning_slug_has_human_text(self):
+        """A slug with no entry falls through to the UI raw. Keyed by the
+        imported constants so a rename breaks the import, but a NEW slug added
+        to core.edges would still slip through — this catches that."""
+        import core.edges as edges
+
+        slugs = {v for k, v in vars(edges).items()
+                 if k.startswith("W_") and isinstance(v, str)}
+        assert slugs == set(WARNING_TEXT), "a warning slug has no human text"
+
+
+class TestExcludeFlagged:
+    def _load_flagged(self, win):
+        orig, disp = _per_pair_flagged_arrays()
+        win.brightness_graph.set_data(orig, disp, in_point=0)
+        win._results_polarity = "both"
+        win._update_results_table()
+        return win.brightness_graph.get_pairs_for("rising", active="both")
+
+    def test_button_disabled_when_nothing_is_flagged(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert not loaded.rise_exclude_flagged_btn.isEnabled()
+
+    def test_excludes_exactly_the_flagged_pairs(self, loaded):
+        pairs = self._load_flagged(loaded)
+        expected = {i for i, p in enumerate(pairs) if not p.is_clean()}
+        assert loaded.rise_exclude_flagged_btn.isEnabled()
+        loaded.rise_exclude_flagged_btn.click()
+        assert loaded._rise_excluded == expected
+
+    def test_uses_the_same_exclusion_machinery_as_the_checkboxes(self, loaded):
+        """No new mechanism: the graph muting, the Clear All button and the CSV
+        Excluded column all keep working because this just ticks the boxes."""
+        pairs = self._load_flagged(loaded)
+        flagged = {i for i, p in enumerate(pairs) if not p.is_clean()}
+        loaded.rise_exclude_flagged_btn.click()
+        for i in flagged:
+            item = loaded._rise_results_model.item(i, loaded._exclude_col)
+            assert item.checkState() == Qt.CheckState.Checked
+        assert loaded.rise_clear_excluded_btn.isEnabled()
+        loaded.rise_clear_excluded_btn.click()
+        assert loaded._rise_excluded == set()
+
+    def test_button_disables_once_everything_flagged_is_excluded(self, loaded):
+        self._load_flagged(loaded)
+        loaded.rise_exclude_flagged_btn.click()
+        assert not loaded.rise_exclude_flagged_btn.isEnabled()
+
+
+class TestEdgeSensitivityControl:
+    def test_disabled_until_a_file_is_loaded(self, window):
+        assert not window.edge_sigma_spin.isEnabled()
+
+    def test_enabled_after_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        assert loaded.edge_sigma_spin.isEnabled()
+
+    def test_changing_it_reaches_the_graph(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.edge_sigma_spin.setValue(7.5)
+        assert loaded.brightness_graph._sigma_k == pytest.approx(7.5)
+
+    def test_cli_value_is_applied(self, loaded):
+        args = SimpleNamespace(
+            fps=None, direction=None, roi_original=None, roi_display=None,
+            min_delta=None, min_spacing=None, max_latency=None, edge_sigma=5.5,
+            in_point=None, out_point=None,
+        )
+        loaded.apply_cli_args(args)
+        assert loaded.edge_sigma_spin.value() == pytest.approx(5.5)
+
+    def test_appears_in_the_generated_cli_command(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.edge_sigma_spin.setValue(4.5)
+        assert "--edge-sigma 4.5" in loaded._build_cli_command()
+
+
+# --------------------------------------------------- manual transition editing
+#
+# The review loop is the deliverable, so there is a test per binding: analyze,
+# walk the transitions with the arrow keys, correct what is wrong, and have the
+# corrections outlive every parameter change and the app itself.
+#
+# The synthetic clip's transitions are instantaneous, so first-light and
+# fully-lit coincide on every one of them — which makes it exactly the footage
+# the push rule (core.manual.set_frame) exists for.
+
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+
+
+def cli_args(**overrides):
+    """An argparse namespace with everything omitted, then the given flags —
+    the shape main() hands apply_cli_args."""
+    args = SimpleNamespace(
+        fps=None, direction=None, roi_original=None, roi_display=None,
+        min_delta=None, min_spacing=None, max_latency=None, edge_sigma=None,
+        in_point=None, out_point=None, no_sidecar=False,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+@pytest.fixture(autouse=True)
+def _no_stale_sidecar(synth_video):
+    """synth_video is session-scoped, so a sidecar written beside it would be
+    restored into every later test that opens the clip."""
+    path = sidecar_path_for(synth_video)
+    path.unlink(missing_ok=True)
+    yield
+    path.unlink(missing_ok=True)
+
+
+def reviewed(win, qtbot):
+    """Analyzed, with the first transition selected the way pressing ↓ does."""
+    analyze(win, qtbot)
+    win.show_frame(0)
+    qtbot.keyClick(win, Qt.Key.Key_Down)
+    return win
+
+
+class TestReviewNavigation:
+    def test_next_transition_selects_what_it_lands_on(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded.show_frame(0)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        target = loaded.brightness_graph.selection()
+        assert target is not None
+        assert loaded.brightness_graph.marker_frame(target) == loaded.timeline.current_frame
+
+    def test_walking_back_selects_too(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        second = loaded.brightness_graph.selection()
+        qtbot.keyClick(loaded, Qt.Key.Key_Up)
+        assert loaded.brightness_graph.selection() != second
+
+    def test_plain_arrows_step_the_playhead_without_touching_the_selection(self, loaded, qtbot):
+        """The verification keys: stepping a frame either side of a marker to
+        judge it must not cost the user their hold on it."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        qtbot.keyClick(loaded, Qt.Key.Key_Left)
+        qtbot.keyClick(loaded, Qt.Key.Key_Left)
+        assert loaded.brightness_graph.selection() == target
+
+    def test_clicking_a_results_row_selects_that_transition(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        index = loaded._rise_results_proxy.index(0, loaded._orig_frame_col)
+        loaded._on_results_row_clicked(index)
+        target = loaded.brightness_graph.selection()
+        assert target is not None and target.roi == "original"
+
+    def test_escape_clears_the_selection(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Escape)
+        assert loaded.brightness_graph.selection() is None
+
+    def test_escape_still_cancels_a_running_extraction(self, loaded, qtbot):
+        """Cancel outranks clearing a selection — Escape during a long decode
+        has always meant "stop", and must keep meaning it."""
+        loaded._on_analyze_clicked()
+        qtbot.keyClick(loaded, Qt.Key.Key_Escape)
+        qtbot.waitUntil(lambda: loaded._extractor is None, timeout=10000)
+        assert loaded.brightness_graph.get_pairs() == []
+
+
+class TestNudging:
+    def test_shift_right_moves_the_marker_and_the_reported_latency(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before_frames = loaded.brightness_graph.resolved_frames(target)
+        before_ms = loaded._rise_results_model.item(0, 5).text()
+
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+
+        after = loaded.brightness_graph.resolved_frames(target)
+        assert after[0] == before_frames[0] + 1
+        assert loaded._rise_results_model.item(0, 5).text() != before_ms
+
+    def test_the_playhead_follows_the_marker(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        target = loaded.brightness_graph.selection()
+        moved = loaded.brightness_graph.resolved_frames(target)[0]
+        assert loaded.timeline.current_frame == moved
+
+    def test_a_coincident_transition_moves_as_one(self, loaded, qtbot):
+        """first == full on every transition in this clip, so nudging
+        first-light right has to carry fully-lit with it or the key is dead."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        first, full = loaded.brightness_graph.resolved_frames(target)
+        assert first == full
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded.brightness_graph.resolved_frames(target) == (first + 1, full + 1)
+        assert "pushed" in loaded.status_label.text()
+
+    def test_shift_down_and_up_switch_ends(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down, SHIFT)
+        assert loaded.brightness_graph.selection().which == "full"
+        qtbot.keyClick(loaded, Qt.Key.Key_Up, SHIFT)
+        assert loaded.brightness_graph.selection().which == "first"
+
+    def test_m_snaps_the_marker_to_the_playhead(self, loaded, qtbot):
+        """The fast path when a marker is badly placed: scrub to the frame that
+        is actually right, press M."""
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        loaded.show_frame(loaded.timeline.current_frame - 3)
+        qtbot.keyClick(loaded, Qt.Key.Key_M)
+        assert loaded.brightness_graph.resolved_frames(target)[0] == loaded.timeline.current_frame
+
+    def test_nudging_with_nothing_selected_only_says_so(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        before = list(loaded.brightness_graph.get_pairs())
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded.brightness_graph.get_pairs() == before
+        assert "Select a transition marker first" in loaded.status_label.text()
+
+    def test_an_edited_pair_is_marked_in_the_results_table(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        assert loaded._rise_results_model.item(0, loaded._manual_col).text() == ""
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded._rise_results_model.item(0, loaded._manual_col).text() == "✎"
+
+    def test_reset_restores_the_measured_frames(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before = loaded.brightness_graph.resolved_frames(target)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded._reset_selected()
+        assert loaded.brightness_graph.resolved_frames(target) == before
+        assert loaded._manual_edits == []
+
+    def test_reset_all_discards_everything(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert len(loaded._manual_edits) == 2
+        loaded._reset_all_edits()
+        assert loaded._manual_edits == []
+
+
+class TestDeleteTransition:
+    def test_delete_drops_the_pair_and_restore_brings_it_back(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        before = len(loaded.brightness_graph.get_pairs())
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert len(loaded.brightness_graph.get_pairs()) == before - 1
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert len(loaded.brightness_graph.get_pairs()) == before
+        assert loaded._manual_edits == []
+
+    def test_a_deleted_transition_stays_selected_so_it_can_be_undone(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        target = loaded.brightness_graph.selection()
+        assert target is not None
+        assert loaded.brightness_graph.is_deleted(target)
+        assert loaded.edit_panel.delete_btn.text() == "Restore"
+
+
+class TestEditPanelReadout:
+    def test_the_panel_shows_both_ends_and_the_automatic_value(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert "first-light" in loaded.edit_panel.first_label.text()
+        assert "fully-lit" in loaded.edit_panel.full_label.text()
+        # The automatic frame is shown beside the chosen one, which is what
+        # makes Reset a meaningful offer.
+        assert "auto" in loaded.edit_panel.first_label.text()
+
+    def test_the_panel_is_inert_with_nothing_selected(self, window):
+        assert window.edit_panel.title_label.text() == "No transition selected"
+        assert not window.edit_panel.nudge_fwd_btn.isEnabled()
+
+    def test_the_panel_buttons_do_what_the_keys_do(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        target = loaded.brightness_graph.selection()
+        before = loaded.brightness_graph.resolved_frames(target)
+        loaded.edit_panel.nudge_fwd_btn.click()
+        assert loaded.brightness_graph.resolved_frames(target)[0] == before[0] + 1
+
+
+class TestExclusionsSurviveANudge:
+    def test_a_nudge_keeps_the_exclude_ticks(self, loaded, qtbot):
+        """Pairing keys on anchors, which nudging never touches, so the
+        positional exclusion indices still mean what they meant. Clearing them
+        on every keypress would make the two features unusable together."""
+        reviewed(loaded, qtbot)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(
+            Qt.CheckState.Checked)
+        assert loaded._rise_excluded == {0}
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        assert loaded._rise_excluded == {0}
+
+    def test_a_deletion_clears_them(self, loaded, qtbot):
+        """A deletion genuinely re-pairs, so a position no longer means what it
+        did and the ticks have to go."""
+        reviewed(loaded, qtbot)
+        loaded._rise_results_model.item(0, loaded._exclude_col).setCheckState(
+            Qt.CheckState.Checked)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert loaded._rise_excluded == set()
+
+
+class TestSidecar:
+    def test_nothing_is_written_before_an_analysis(self, loaded):
+        """Opening and scrubbing footage must not drop files beside it."""
+        loaded._save_sidecar()
+        assert not sidecar_path_for(loaded.reader.metadata.path).exists()
+
+    def test_settings_are_written_after_an_analysis(self, loaded, qtbot):
+        analyze(loaded, qtbot)
+        loaded._save_sidecar()
+        state = load_session(loaded.reader.metadata.path)
+        assert state is not None
+        assert state.roi_original == (ROI_ORIG.x, ROI_ORIG.y, ROI_ORIG.width, ROI_ORIG.height)
+        assert state.min_delta == loaded.delta_spin.value()
+
+    def test_manual_edits_are_written(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded._save_sidecar()
+        state = load_session(loaded.reader.metadata.path)
+        assert state.manual_edits == loaded._manual_edits
+
+    def test_reopening_restores_settings_and_edits(self, loaded, qtbot, synth_video):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        loaded.spacing_spin.setValue(4)
+        loaded._save_sidecar()
+        edits = list(loaded._manual_edits)
+
+        loaded.open_file(synth_video)
+        assert loaded._manual_edits == edits
+        assert loaded.spacing_spin.value() == 4
+        assert loaded.frame_view.get_roi("original") == ROI_ORIG
+        # Restoring must not start a decode pass on its own.
+        assert loaded._extractor is None
+        assert loaded.brightness_graph.get_pairs() == []
+
+    def test_a_restored_threshold_survives_the_auto_computation(self, loaded, qtbot, synth_video):
+        """A saved Min Δ is a decision, not a default: the auto-compute at the
+        end of extraction must not overwrite it."""
+        analyze(loaded, qtbot)
+        loaded.delta_spin.setValue(33)
+        loaded._save_sidecar()
+
+        loaded.open_file(synth_video)
+        loaded.frame_view.set_roi("original", ROI_ORIG)
+        loaded.frame_view.set_roi("display", ROI_DISP)
+        analyze(loaded, qtbot)
+        assert loaded.delta_spin.value() == 33
+
+    def test_a_cli_flag_beats_the_sidecar_and_omitted_ones_come_from_it(
+        self, loaded, qtbot, synth_video
+    ):
+        analyze(loaded, qtbot)
+        loaded.delta_spin.setValue(33)
+        loaded.spacing_spin.setValue(7)
+        loaded._save_sidecar()
+
+        loaded.open_file(synth_video)
+        loaded.apply_cli_args(cli_args(min_delta=41))
+        assert loaded.delta_spin.value() == 41   # the flag the user typed
+        assert loaded.spacing_spin.value() == 7  # the one they didn't
+
+    def test_no_sidecar_neither_reads_nor_writes(self, window, qtbot, synth_video):
+        window.open_file(synth_video)
+        window.frame_view.set_roi("original", ROI_ORIG)
+        window.frame_view.set_roi("display", ROI_DISP)
+        analyze(window, qtbot)
+        window._save_sidecar()
+        assert sidecar_path_for(synth_video).exists()
+
+        window.set_sidecar_enabled(False)
+        window.spacing_spin.setValue(9)
+        window.open_file(synth_video)
+        assert window.spacing_spin.value() == 9   # not overwritten by the file
+        window._save_sidecar()
+        assert load_session(synth_video).min_spacing != 9
+
+    def test_an_unwritable_location_is_reported_not_raised(self, loaded, qtbot, monkeypatch):
+        """A read-only card or a vanished network share must not interrupt a
+        review pass — the measurement is unaffected either way."""
+        analyze(loaded, qtbot)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("ui.main_window.save_session", boom)
+        loaded._save_sidecar()
+        assert "Could not save settings" in loaded.status_label.text()
+
+
+class TestEditPanelEdgeCases:
+    def test_reset_is_offered_whenever_an_edit_exists(self, loaded, qtbot):
+        """Even a marker nudged away and back still carries a pinned value, so
+        Reset keyed on "do the frames differ" would leave no way to clear it."""
+        reviewed(loaded, qtbot)
+        assert not loaded.edit_panel.reset_btn.isEnabled()
+        qtbot.keyClick(loaded, Qt.Key.Key_Right, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Left, SHIFT)
+        assert loaded._manual_edits          # still pinned, back at the auto frames
+        assert loaded.edit_panel.reset_btn.isEnabled()
+
+    def test_a_deleted_transition_shows_no_position_count(self, loaded, qtbot):
+        """It is not one of the stops Up/Down walks, so "transition 0 of 4"
+        would be a lie."""
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        title = loaded.edit_panel.title_label.text()
+        assert "deleted" in title
+        assert "transition 0" not in title
+
+    def test_the_panel_agrees_with_the_ring_on_a_deleted_transition(self, loaded, qtbot):
+        """A ring on the graph with "No transition selected" underneath would
+        be the panel and the graph disagreeing about what is selected."""
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        assert loaded._selection_info() is not None
+        assert loaded.edit_panel.title_label.text() != "No transition selected"
+
+    def test_switching_ends_on_a_deleted_transition_does_not_crash(self, loaded, qtbot):
+        reviewed(loaded, qtbot)
+        qtbot.keyClick(loaded, Qt.Key.Key_Delete)
+        qtbot.keyClick(loaded, Qt.Key.Key_Down, SHIFT)
+        qtbot.keyClick(loaded, Qt.Key.Key_Up, SHIFT)
+        assert loaded.brightness_graph.selection() is not None

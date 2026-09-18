@@ -1,17 +1,128 @@
 from dataclasses import dataclass
 
+from core.edges import TransitionEdge
+
 
 @dataclass
 class LatencyPair:
     orig_frame: int
     disp_frame: int
     polarity: str  # "rising" | "falling"
+    # Measured extent of each end's transition, when it could be characterized.
+    # Optional with defaults so positional construction — LatencyPair(10, 13,
+    # "rising") — keeps working everywhere it already appears.
+    orig_edge: TransitionEdge | None = None
+    disp_edge: TransitionEdge | None = None
 
     def delta_frames(self) -> int:
+        """Anchor to anchor: the steepest-step difference, which is what
+        pairing keys on. Deliberately unchanged and still an int — the three
+        reported metrics below are what the UI shows."""
         return self.disp_frame - self.orig_frame
 
     def delta_ms(self, fps: float) -> float:
         return self.delta_frames() / fps * 1000.0
+
+    # --- the three reported metrics ---------------------------------------
+    # First-pixel and full-frame both measure FROM the source's own first-light
+    # frame — not each end's own matching point. Comparing full-frame against
+    # the source's own full_frame depended on that measurement being
+    # trustworthy, and it wasn't always: two edges each individually measured
+    # with first_frame <= full_frame give no guarantee about the relationship
+    # between one edge's full_frame and the other's, so a source whose own
+    # settling was slower or noisier than the display's could make full-frame
+    # latency read BELOW first-pixel latency for the same pair — physically
+    # backwards, since the display can't finish showing a change earlier than
+    # its own reported first-light delay would suggest. Sharing one zero point
+    # ties `full_delta - first_delta` to exactly the DISPLAY's own ramp length
+    # (`disp.full_frame - disp.first_frame`), which is >= 0 by construction, so
+    # full-frame latency can never again read below first-pixel latency.
+    #
+    # Where either end could not be characterized, all three fall back to the
+    # anchor delta rather than reporting nothing: a transition at the very edge
+    # of the analysis range still deserves a usable row.
+
+    def _edge_delta(self, orig_attr: str, disp_attr: str) -> float | None:
+        if self.orig_edge is None or self.disp_edge is None:
+            return None
+        return float(getattr(self.disp_edge, disp_attr) - getattr(self.orig_edge, orig_attr))
+
+    def first_delta_frames(self) -> float:
+        """Display first-light minus source first-light."""
+        delta = self._edge_delta("first_frame", "first_frame")
+        return float(self.delta_frames()) if delta is None else delta
+
+    def full_delta_frames(self) -> float:
+        """Display fully-lit minus source first-light — the same zero point as
+        first-pixel latency, not the source's own fully-lit frame. That's what
+        guarantees this can never read below first_delta_frames(): the gap
+        between the two is exactly the display's own ramp length, never
+        negative."""
+        delta = self._edge_delta("first_frame", "full_frame")
+        return float(self.delta_frames()) if delta is None else delta
+
+    def avg_delta_frames(self) -> float:
+        """Mean of the two. Commonly a half-frame value, which is a genuine
+        gain in resolution rather than a rounding artifact."""
+        return (self.first_delta_frames() + self.full_delta_frames()) / 2.0
+
+    def first_delta_ms(self, fps: float) -> float:
+        return self.first_delta_frames() / fps * 1000.0
+
+    def full_delta_ms(self, fps: float) -> float:
+        return self.full_delta_frames() / fps * 1000.0
+
+    def avg_delta_ms(self, fps: float) -> float:
+        return self.avg_delta_frames() / fps * 1000.0
+
+    def orig_first_frame(self) -> int:
+        """The frame the source first shows any light — the frame the UI
+        reports and seeks to. Falls back to the anchor when this end could not
+        be characterized, matching the delta accessors above.
+
+        The anchor (`orig_frame`) is the steepest single-frame step and is an
+        internal matching detail: it is not drawn on the graph and is not one
+        of the three reported metrics."""
+        return self.orig_edge.first_frame if self.orig_edge else self.orig_frame
+
+    def disp_first_frame(self) -> int:
+        """Display counterpart of orig_first_frame."""
+        return self.disp_edge.first_frame if self.disp_edge else self.disp_frame
+
+    # --- quality ----------------------------------------------------------
+
+    def quality_warnings(self) -> tuple[str, ...]:
+        """Both ends' quality flags, deduplicated, source end first. A pair is
+        only as trustworthy as its worse end, so these are unioned rather than
+        reported separately."""
+        seen: list[str] = []
+        for edge in (self.orig_edge, self.disp_edge):
+            if edge is None:
+                continue
+            for warning in edge.warnings:
+                if warning not in seen:
+                    seen.append(warning)
+        return tuple(seen)
+
+    def is_clean(self) -> bool:
+        return not self.quality_warnings()
+
+    def is_manually_adjusted(self) -> bool:
+        """Either end placed by hand (see core.manual). Drives the results
+        table's edit marker only — it is not a quality verdict, and a hand-placed
+        measurement is if anything the more trustworthy one."""
+        return any(
+            edge is not None and edge.manual
+            for edge in (self.orig_edge, self.disp_edge)
+        )
+
+    def manual_ends(self) -> tuple[str, ...]:
+        """Which ends were placed by hand, for the results-table tooltip."""
+        return tuple(
+            name
+            for name, edge in (("source", self.orig_edge), ("display", self.disp_edge))
+            if edge is not None and edge.manual
+        )
 
 
 DEFAULT_MAX_LATENCY_FRACTION = 0.5  # fraction of Original Period used as the Max Latency default
@@ -32,11 +143,16 @@ def pair_transitions(
     disp_frames: list[int],
     polarity: str,
     max_frames: int | None = None,
+    orig_edges: dict[int, TransitionEdge] | None = None,
+    disp_edges: dict[int, TransitionEdge] | None = None,
 ) -> tuple[list[LatencyPair], list[int], list[int]]:
     """Greedy nearest-following match. Each disp frame used at most once.
     A same-frame transition (df == of) pairs as zero latency. Frame lists are
     assumed duplicate-free (detection emits strictly increasing frames).
     max_frames: if set, only pair disp transitions within this many frames of orig.
+    orig_edges/disp_edges: characterized extents keyed by anchor frame, in the
+    same frame space as the lists above; attached to each pair when supplied.
+    Matching itself is unaffected by them.
     Returns (pairs, unmatched_orig_frames, unmatched_disp_frames)."""
     pairs: list[LatencyPair] = []
     unmatched_orig: list[int] = []
@@ -51,7 +167,12 @@ def pair_transitions(
         if j < len(sorted_disp) and (
             max_frames is None or sorted_disp[j] - of <= max_frames
         ):
-            pairs.append(LatencyPair(of, sorted_disp[j], polarity))
+            df = sorted_disp[j]
+            pairs.append(LatencyPair(
+                of, df, polarity,
+                orig_edge=None if orig_edges is None else orig_edges.get(of),
+                disp_edge=None if disp_edges is None else disp_edges.get(df),
+            ))
             j += 1
         else:
             unmatched_orig.append(of)

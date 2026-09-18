@@ -26,7 +26,14 @@ core/
   roi.py                  ROI dataclass: pixel rect, clipping, mean brightness
   extractor.py            BrightnessExtractor: QThread, sequential brightness pass
   detection.py            derivative-based transition detection (pure NumPy)
+  edges.py                TransitionEdge: measures each transition's extent
+                          (first-light / fully-lit) + quality checks
   latency.py              LatencyPair + pair_transitions (greedy matching)
+  manual.py               ManualEdit: the user's own placement of a transition,
+                          overriding detection; bound to a transition, not a
+                          list position, so it survives parameter changes
+  session.py              <video>.latency.json sidecar: every parameter plus
+                          every manual edit, read/written per clip
   export.py               CSV export of latency pairs (stdlib csv)
   view_range.py            pure clamp/center/zoom/pan math for graph zoom
 ui/
@@ -35,6 +42,8 @@ ui/
   brightness_graph.py     BrightnessGraphWidget: traces, detection, pair markers
   timeline.py             TimelineWidget: playhead + draggable in/out handles
   zoom_bar.py              ZoomBarWidget: graph zoom/pan bar above the timeline
+  edit_panel.py           TransitionEditPanel: the selected marker's state, and
+                          the mouse equivalent of every editing keystroke
 ```
 
 `core/` has no Qt-widget dependencies beyond `extractor.py`'s QThread and is
@@ -42,9 +51,12 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
 
 ## Data flow
 
-1. **Load** — `MainWindow.open_file` builds a `VideoReader`. Scrubbing calls
-   `read_frame(index)`; seeks use `CAP_PROP_POS_FRAMES` (frame-index, not
-   time-based — time seeks are not reliably frame-accurate in OpenCV/ffmpeg).
+1. **Load** — `MainWindow.open_file` builds a `VideoReader`, then restores the
+   clip's `<video>.latency.json` sidecar if it has one (parameters, ROIs,
+   in/out points and manual edits — see "The settings sidecar" below).
+   Scrubbing calls `read_frame(index)`; seeks use `CAP_PROP_POS_FRAMES`
+   (frame-index, not time-based — time seeks are not reliably frame-accurate in
+   OpenCV/ffmpeg).
 2. **ROI selection** — user drags rectangles on `RoiFrameView`; it emits
    `roi_changed(name, ROI)` in *original-frame pixel coordinates*. A live
    mean-brightness readout is recomputed per scrubbed frame.
@@ -58,6 +70,9 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    `core.detection`: `np.diff` against a delta threshold, consecutive
    over-threshold frames collapsed to the steepest step. Detection re-runs live
    when the user changes Min ΔBrightness, Min Spacing, or Max Latency.
+   `core.manual` then re-binds the user's edits onto the fresh anchors and
+   removes the transitions they deleted, before characterization; their moved
+   frames are applied after it (see "Manual transition editing" below).
 5. **Pairing** — `pair_transitions` greedily matches each original transition to
    the nearest display transition at or after it (same polarity: rising with
    rising, falling with falling), one-to-one, optionally capped by Max Latency.
@@ -71,8 +86,10 @@ importable without a GUI. `ui/` depends on `core/`, never the other way around.
    the per-direction "Show Excluded" filter, and "Clear All" are all
    independent between the rise and fall panels. Exclusion has no identity
    across a redetect — pairs are keyed only by their position in the current
-   list, not a stable id — so any threshold change or new Analyze run clears
-   all exclusions for both directions. `MainWindow` owns the exclude sets;
+   list, not a stable id — so it is dropped whenever the list of pairs itself
+   changes, and unconditionally on a new Analyze run (see "Exclusions are now
+   cleared by the pairs changing" below; a manual nudge provably cannot change
+   the pairs, and deliberately keeps them). `MainWindow` owns the exclude sets;
    `BrightnessGraphWidget.set_excluded_pairs()` is a pure rendering hint
    (mutes the matched marker/connector color for excluded pairs) and must
    never emit `pairs_updated`, or it would immediately clear the sets it was
@@ -199,12 +216,249 @@ drag started until an incidental future move.
 
 ## Detection algorithm and its limits
 
-Detection is a **per-frame derivative threshold**: a transition exists where a
-single frame-to-frame brightness step exceeds delta. Consequences:
+Detection runs in **two stages**, deliberately kept in separate modules:
+
+1. **Locate** (`core/detection.py`) — *which* transitions exist. A per-frame
+   derivative threshold; a run of consecutive over-threshold steps collapses to
+   the frame of steepest change, the **anchor**. Pairing, Min Spacing and the
+   Original Period heuristic all key on anchors.
+2. **Characterize** (`core/edges.py`) — *how far each one extends*. Given the
+   anchor, walk outward to find first-light and fully-lit.
+
+The anchor is not drawn and is not reported. It is the most robust point on the
+curve for matching, but it is not any of the three metrics: on an asymmetric
+ramp the steepest step sits early, which is what made the single number this
+tool used to report neither first-pixel nor full-frame.
+
+### The source light is not always an LED
+
+Test setups vary: an LED bulb, some other kind of bulb, or a computer screen
+playing a test pattern. **Never tune detection to one of them.** Each has a
+different transition shape:
+
+- **LED** — near-instant; first-light and fully-lit are one or two frames apart.
+- **Incandescent/other bulb** — ramps slowly and *uniformly* across the whole
+  lit area.
+- **Screen** — lights progressively by scanline, so a small area is fully bright
+  while the rest is still dark.
+
+ROI **mean** brightness is the source-agnostic statistic, and that is why it
+stays. A high percentile or a lit-pixel fraction is tempting — it detects a
+screen's first scanline far more sensitively than a mean does, since a mean
+barely moves when 5% of the area lights. But on a bulb that brightens uniformly
+the same statistic fires the instant any single pixel crosses a threshold, which
+is noise, not signal. It would optimise for one source at the others' expense.
+
+The same applies to ramp length: a multi-frame rise is a property of the source,
+not a defect, and must not be treated as bad data on its own.
+
+### The three metrics
+
+    first-pixel latency = display first_frame - source first_frame
+    full-frame  latency = display full_frame  - source first_frame
+    average     latency = mean of the two
+
+Both metrics are anchored at the **same zero point**: the source's own
+first-light frame. First-pixel compares it against the display's first-light;
+full-frame against the display's fully-lit. Average is a genuine half-frame
+value when the two differ, which is a resolution gain, not a rounding
+artifact. Where either end could not be characterized, all three fall back to
+the anchor delta rather than mixing an edge frame against an anchor frame.
+
+Full-frame deliberately does **not** subtract the source's own `full_frame`.
+An earlier version did, on the reasoning that each metric should compare "the
+same point on the curve at both ends" — but two edges each individually
+measured with `first_frame <= full_frame` give no guarantee about the
+relationship between *one edge's* `full_frame` and the *other's*. On footage
+of a flickering LED source whose plateau bounced for several frames after its
+steepest step, the source's own `full_frame` landed later than its
+`first_frame` purely from that bounce, and because the display settled cleanly
+and fast, full-frame latency came out *below* first-pixel latency for the same
+pair (29.2 ms vs 37.5 ms) — physically backwards, since the display can't
+finish showing a change earlier than its own reported first-light delay would
+suggest.
+
+Anchoring both metrics at the source's first-light instead fixes this
+structurally, not just for that footage: `full_delta - first_delta` is now
+always exactly `display.full_frame - display.first_frame`, the display's own
+ramp length, which is `>= 0` for every edge by construction (see
+`TransitionEdge` below). Full-frame latency can therefore never again read
+below first-pixel latency, regardless of how a given source settles.
+
+The tradeoff is explicit, not hidden: for a source with a real, non-trivial
+rise time — a computer-monitor test pattern filling by scanline is the
+documented case above — that rise time now flows into full-frame and average
+latency rather than canceling out against the source's own measurement. This
+is intentional. A known-fast source (an LED reaching full brightness in 1-2
+frames) contributes next to nothing either way; a source with a genuinely
+comparable rise time to the display contributes a real, honest amount, rather
+than a number whose sign depended on how precisely two independent
+measurements of the source's own settling happened to agree.
+
+For an instantaneous transition first = full = anchor, so a square-wave clip
+measures exactly as it did before this split existed.
+
+### Baseline drift, and why there is no detrending
+
+Baseline, plateau and noise are all measured **locally**, per transition, from
+the flat runs immediately either side of it. Nothing is computed once globally
+and reused. Each transition calibrates against its own local levels.
+
+"Local" means local in **time**, not merely local to the neighbouring
+transitions, and the distinction is not academic. On real 240fps footage the
+gap between flashes ran to 276 frames, and that stretch drifted 143 levels end
+to end; a median over all of it is nothing like the level immediately before
+the transition. `LEVEL_WINDOW_FRAMES` caps each level's measurement window to
+the frames nearest the transition. `estimate_noise` chunks flat runs by the
+same window before taking residuals, for the same reason — measured in one
+pass over a whole drifting run, a display's sigma came out at 17 levels when
+its actual frame-to-frame scatter was well under one.
+
+**The band widens with the baseline's own wander** (`DRIFT_BAND_K` × the
+measured tilt), and this applies to the **first-light band only**. First-light
+is found by walking *backward* from the anchor, so it traverses the baseline
+and will run the entire length of any creep it cannot distinguish from signal.
+Real footage had a display's dark level climbing ~0.35 levels/frame for 20+
+frames before each flash; with a band sized only for frame-to-frame scatter the
+walk sailed straight through it and reported **0.00 ms latency**, which is
+physically impossible. Fully-lit is found by scanning *forward* and stops at
+the first qualifying frame, so it never traverses drift — widening its band
+buys no robustness and costs real precision, and doing so made a 4-frame
+synthetic ramp measure as 3.
+
+The drift term is self-calibrating: with no tilt it contributes nothing, so
+precision on clean footage is not sacrificed to robustness on drifting footage.
+
+Sigma takes the **larger** of the local and pooled estimates. Local alone keeps
+drift out, but a MAD over the dozen frames either side of one transition has
+high variance and tends to come out low, and under-estimating sigma is the
+dangerous direction — it narrows the band and reports first-light early. The
+pooled figure is scatter about each segment's own median, so using it as a
+floor costs no drift immunity.
+
+**Local sigma itself takes the larger of pre's and post's own MAD, computed
+separately — never one MAD pooled over both concatenated.** Pre (baseline) and
+post (plateau) can have genuinely different noise floors: on real 240fps
+footage of a flickering LED source, the dark baseline sat rock-steady while
+the lit plateau carried a few levels of real scatter (PWM flicker). Pooling
+let the quiet baseline's near-zero residuals drag the combined MAD down to
+~0.08 despite the plateau visibly bouncing several levels — sigma this
+underestimated let a too-tight band go uncrossed for several frames, delaying
+that transition's `full_frame` until noise happened to cross it by chance,
+which measured a 4-frame ramp on a source that reaches full brightness in 1-2
+frames. Taking each side's MAD separately fixed this without touching the
+pooled *global* floor above, which stays pooled across the whole signal — a
+tempting whole-signal "take the max across every chunk" alternative was tried
+and rejected, since one genuinely anomalous frame elsewhere in the clip (a
+spurious brightness spike mid-transition, unrelated to this fix) blew that
+estimate up to ~48 and made every band absurd. The dilution problem is local
+to one transition's own pre/post windows; fix it there.
+
+There is deliberately **no detrending**. For slow drift it is redundant given
+local baselines; for fast drift the data is genuinely corrupt and subtracting a
+trend would hide that behind a plausible-looking number. Drift fast enough to
+matter within one transition is flagged instead.
+
+### The dirty-data guard
+
+Per transition (`TransitionEdge.warnings`): `low-snr`, `ambiguous-edge`,
+`slow-ramp`, `unsteady-level`. Per signal (`SignalQuality`):
+`unstable_baseline`, `inconsistent_amplitude`, each comparing transitions
+against each other — baselines **within a polarity only**, since on a square
+wave a rising transition's baseline is the dark level and a falling one's is
+the bright level.
+
+### The device under test moves its own baseline
+
+The Display ROI shows the *device under test's* image. If that device has
+auto-exposure — most FPV cameras do — its AE opens up through every dark
+stretch of the test pattern and closes when the light fires. Measured on real
+footage across one LED-off period, the display's level went
+34 → 43 → 90 → 126 → 91 → 104 before the next flash: AE opening, then hunting.
+
+That is the device working normally, not a defective recording, and the
+measurements came out **correct anyway** — the drift-aware band exists exactly
+for this. It is why `unstable_baseline` and `inconsistent_amplitude` describe
+signal *shape* and are never presented as errors. Framing, changing light, a
+nudged camera and AE on the device under test all produce an identical
+signature, so **nothing may assert a cause**; the tool reports what it measured
+and the person who set the shot up supplies the why.
+
+Two retractions worth recording, because both are easy to arrive at again:
+
+- **Do not judge "is this ROI framed correctly" with an absolute brightness
+  threshold.** Counting pixels above `dark + 40` said the reference clip's
+  Display ROI was 29% permanently bright and 25% permanently dark, implying
+  bad framing. It was an artifact — exposure and screen brightness vary, so an
+  absolute cutoff measures the wrong thing. Redone per-pixel, comparing each
+  pixel only against itself at two times, **89% of that ROI participates fully**
+  and the framing is fine.
+- **The recording camera's exposure was locked, and background patches away
+  from both screens swing *with* the light** (2.3 → 39/87/175), which is the
+  light illuminating the room — the opposite sign from AE compensation. Do not
+  re-diagnose the recording camera.
+
+### Which UI each level drives
+
+The two levels drive **different UI**, and the distinction matters: the ⚠
+column and Exclude Flagged key on per-transition flags; the banner keys on the
+per-signal verdict, and renders it as information rather than a warning unless
+some measurement is flagged too. A steadily drifting baseline flags the *signal* but flags
+no individual pair, because under pure drift every transition is still locally
+well-measured and its latency is genuinely fine. Drift mild relative to the
+step is absorbed by the adaptive band and raises no per-transition warning at
+all — the measurement is correct, so flagging it would be noise, and a warning
+that fires on every mild creep is one the user learns to ignore.
+
+`unsteady-level` compares the **tilt** of a level region (medians of its first
+and last quarters) against both a fraction of amplitude and a multiple of
+sigma. Peak-to-peak was the obvious first choice and is wrong: ptp grows with
+noise, so on real footage it called a perfectly flat but noisy display region
+drifting — flagging every pair of a good clip, which is precisely how a warning
+gets trained into being ignored. Both terms are needed; the sigma term is what
+separates a noisy level from a moving one.
+
+The guard warns and never suppresses. A flag is a prompt to look, not a
+verdict; Exclude Flagged is a button the user presses, and it reuses the
+existing exclusion sets rather than introducing a parallel mechanism.
+
+Two estimator subtleties worth not re-deriving:
+
+- The quality checks use **max-deviation-from-median, not MAD**, even though
+  MAD is used for noise. MAD is robust *to outliers*, and an outlier is exactly
+  what those checks exist to catch: one cycle at half amplitude among four good
+  ones leaves MAD at exactly zero.
+- `slow-ramp` measures the ramp against the **whole** gap to the neighbouring
+  transitions, not half of it. Half made the verdict depend on how much empty
+  space happened to surround a transition rather than on the transition itself.
+
+All the thresholds are named constants in `core/edges.py`. They have been
+calibrated against one real 240fps clip (4 transitions, LED source) plus
+synthetic cases, which is a start, not a validation — footage from a bulb or a
+screen source has not been tested at all, and those have very different
+transition shapes (see above). They are still
+first guesses that still need tuning against real footage.
+
+### Limits of the locate stage
+
+These are properties of stage 1 and are unchanged:
 
 - A slow multi-frame fade (LCD pixel response, exposure blending) where no
   single step crosses delta is **missed entirely**, even if the cumulative
   change is large. Lower delta or a faster test pattern edge is the workaround.
+  Characterization cannot rescue this: it only measures transitions the locate
+  stage already found.
+- A step change in ROI composition — the display snapping into frame — is
+  detected as a genuine transition. Characterization now flags it, but does not
+  suppress it; rejecting non-transition steps would mean changing the locate
+  stage, which would move existing measurements.
+- **Lowering Min ΔBrightness far enough can make auto-exposure look like a
+  transition.** On the reference footage the device under test's AE moved the
+  display 25–39 levels over ten frames. That is only ~3 levels per frame, so a
+  per-frame derivative at the Min Δ of 20 in use never saw it — but someone
+  dropping Min Δ to chase a dim transition could start detecting AE hunting as
+  transitions. The tell is transitions appearing at implausibly regular
+  intervals through a stretch where nothing flashed.
 - Delta is auto-computed on new data (10 % of the combined brightness range,
   min 5) only while the spinbox is untouched — a user-set or CLI threshold
   survives re-analysis.
@@ -216,6 +470,190 @@ single frame-to-frame brightness step exceeds delta. Consequences:
   "Auto" button next to the spinbox recomputes and re-applies that value
   on demand; the click itself counts as a user edit, so it's a one-time
   snap rather than a standing auto mode.
+
+## Manual transition editing
+
+Detection and characterization are heuristics, and across real-world footage the
+conclusion was that neither can be made reliable on noisy signals by tuning
+alone: parameters that read a clean clip correctly produce false edges on a
+dirty one, and the fix is not more knobs. The tool makes a first pass; the user
+walks the transitions, checks each against the video, and corrects what is
+wrong. **A user decision outranks any automatic value and survives every
+parameter change.**
+
+`core/manual.py` holds the whole concept, Qt-free and NumPy-free. `core/edges.py`
+and `core/detection.py` know nothing about it — with no edits present the
+pipeline produces exactly the numbers it produced before manual editing existed,
+which is what keeps identical footage and settings reproducible.
+
+### Where the two kinds of edit are applied, and why not together
+
+    find_rising/find_falling -> apply_min_spacing
+      -> rebind -> delete_anchors        <- deletions, BEFORE characterization
+      -> characterize_signal
+      -> apply_overrides                 <- moved frames, AFTER characterization
+      -> pair_transitions
+
+**Deletions must come first.** `characterize_signal` bounds each transition's
+search window at the midpoints to its *neighbouring anchors*, so a noise blip
+located as a transition truncates the window of the real transition beside it —
+the survivor's fully-lit scan stops mid-ramp. Deleting the blip any later would
+leave that damage in place. `tests/test_manual.py` pins this with a synthetic
+ramp whose measured `full_frame` moves once the blip beside it is deleted.
+
+**Overrides must come last,** where they cannot disturb anything upstream.
+`anchor_frame` is never touched and pairing keys on anchors, so nudging a marker
+changes the reported milliseconds and nothing else — it can never silently
+re-pair a transition. Deleting one removes an anchor and therefore does re-pair,
+which is exactly what it is for: greedy `pair_transitions` matches the *first*
+following display transition, so a false read beside a real one steals its match
+until the false read is gone.
+
+### Identity: an edit is bound to a transition, not to a position
+
+Exclusions are positions in a list and have no identity across a redetect. Manual
+edits cannot work that way — a review pass is too much work to lose to a slider
+nudge — so `rebind` re-resolves each edit onto the current anchors before
+anything reads it, taking the nearest same-ROI same-polarity anchor within
+`REBIND_WINDOW_FRAMES`, one-to-one, nearest first with ties broken to the lower
+frame (so the result never depends on the order the user made the edits in). The
+edit's recorded `anchor_frame` is rewritten to whatever it bound to, so a series
+of small parameter changes *tracks* the transition instead of drifting out of the
+window.
+
+Anchors do not move at all when Edge Sensitivity or Max Latency change — neither
+reaches `core/detection.py` — and move a frame or two under Min ΔBrightness or
+Min Spacing, since the steepest step stays where it is and only the run collapsed
+around it grows.
+
+An edit that finds no anchor is left **dormant, not discarded**: its transition
+is not currently being detected, but raising Min Δ and lowering it again must
+bring the user's decision back rather than silently losing it. A dormant deletion
+draws nothing — a cross where detection found nothing this pass would claim
+something was removed that was never there.
+
+`BrightnessGraphWidget` owns the rebinding (it is where the anchor lists live)
+and hands the updated list back through `manual_edits_rebound`. MainWindow, which
+owns the authoritative list, must only **store** what arrives there; calling
+`set_manual_edits` in response would re-enter the redetect that produced it — the
+same non-reentrancy rule that already governs `set_excluded_pairs`.
+
+### Nudging pushes; it does not block
+
+`_characterize_one` clamps both frames to the anchor, so on an instantaneous
+transition — the normal shape for an LED source — `first_frame == full_frame`.
+`_edge_frames` collapses them into a set and `_populate_mid` draws no midpoint
+dot, so the graph shows **one** triangle there.
+
+Blocking at `first <= full` would therefore make "nudge first-light right" and
+"nudge fully-lit left" dead keys on the most ordinary transition there is.
+Instead `set_frame` pushes: raising first-light past fully-lit carries fully-lit
+along, and vice versa. On a coincident marker that moves the whole transition,
+which is what someone looking at a single triangle means by nudging it. The edit
+panel shows both frame numbers at all times so a push is never invisible, and the
+status line names it.
+
+**Both ends are pinned once either is touched.** Leaving the untouched end
+tracking the algorithm would let it move on its own at the next parameter change,
+which is not something "the user's decision is authoritative" can be allowed to
+mean. Reset restores both together.
+
+### Which warnings survive an override
+
+`slow-ramp` and `ambiguous-edge` are dropped; `low-snr` and `unsteady-level` are
+kept. The first two describe how confident the *automatic reading* was about
+*where the edge lay*, and that reading no longer exists once a person has said
+where it is — leaving them would be crying wolf about a question already
+answered. The last two describe the signal itself and are just as true
+afterwards. The ✎ column is what tells a reader a human placed the point; it sits
+beside ⚠ rather than replacing it, because a pair can carry both and they answer
+different questions.
+
+### Exclusions are now cleared by the pairs changing, not by the signal firing
+
+`_on_pairs_rebuilt` used to clear both exclusion sets on every `pairs_updated`.
+It now compares a signature of the pair list — `(orig_frame, disp_frame)` per
+pair, per direction — and clears only when that actually changed.
+
+This is required, not a tidy-up: a nudge re-runs the pipeline but provably cannot
+re-pair anything, so the old rule would have wiped the user's Exclude ticks on
+every keypress and made the two features unusable together. A deletion, a
+threshold change that moves anchors, and a fresh Analyze all still clear —
+Analyze unconditionally, by resetting the signature at click time, since it is an
+explicit "start this measurement over" even when the pairs come out identical. It
+also fixes an existing wart: changing Edge Sensitivity used to clear exclusions
+despite pairing being unchanged.
+
+### Selection is independent of the playhead
+
+The playhead is where the user is *looking*; the selection is what they are
+*editing*. Keeping them separate is what makes the loop work — stepping a frame
+either side of a marker to judge it must not cost the user their hold on it, so
+plain Left/Right stay pure playhead stepping and are the verification keys.
+
+An `EditTarget` is `(roi, polarity, anchor_frame, which)`. It addresses the
+transition by anchor rather than by the frame its marker sits on, because nudging
+moves the marker and a selection that lost track of its transition the moment it
+moved would be useless.
+
+Up/Down select the marker they land on. Without that, every transition would need
+a mouse trip to the graph before it could be nudged, which breaks the one flow
+the feature exists for. Clicking a marker selects it (reusing the snap that
+click-to-seek already does), clicking bare graph clears the selection, and
+clicking a results row selects that pair's marker.
+
+Hit-testing stays **X-first**, for the reason given under Graph zoom/pan: the
+real cursor is blanked while the hover line shows, so the user cannot aim by Y. Y
+is used only to break a tie between markers on the *same* frame on the two
+traces, which are far apart vertically. Where `first == full` the two ends are
+indistinguishable by position, so a click selects first-light and Shift+↑/↓ is
+how the other end is reached — vertical keys choose *which* point, horizontal
+keys *move* it.
+
+A deleted transition stays drawn (a dim grey ×) and stays selectable. A deletion
+the user cannot see is one they cannot check, and one they cannot select is one
+they cannot undo. It is excluded from pairing, from Up/Down navigation and from
+the unmatched list.
+
+## The settings sidecar
+
+`<video>.latency.json`, written beside the clip. `core/session.py`.
+
+A review pass is real work, so it is saved, along with every analysis parameter,
+and restored when the clip is reopened. `SessionState` carries the **same field
+names as the argparse namespace** in `main()`, so a restored session and a
+command line are applied by one code path (`MainWindow._apply_settings`) and
+cannot drift apart in what they mean. That is also what makes the precedence rule
+one sentence: `main()` calls `open_file` (which reads the sidecar) before
+`apply_cli_args`, so a flag the user typed wins and a flag they omitted comes
+from the sidecar. `--no-sidecar` turns the mechanism off entirely, and must be
+applied before `open_file` — `apply_cli_args` runs too late to suppress a read
+that has already happened.
+
+Restoring deliberately does **not** start an analysis. Extraction is a full
+decode pass, and kicking one off unasked would lock the UI for as long as the
+clip is, every time the file is opened.
+
+Saving is automatic and debounced, but gated on a completed analysis, so merely
+opening and scrubbing footage never drops files beside it. Writes go through a
+temp file and an atomic replace, since this runs on every nudge and an
+interrupted write must not leave a half-written file where a valid one was. An
+`OSError` — read-only card, full disk, vanished network share — is reported in
+the status line and otherwise ignored: the measurement is unaffected, and a
+dialog mid-review would not be.
+
+Reading is total. A missing, unreadable, truncated, malformed or
+future-versioned file yields `None` and the clip opens with normal defaults; a
+single malformed manual edit is skipped rather than costing the user their ROIs.
+A settings file is a convenience, and no convenience gets to stop a measurement
+tool from opening footage.
+
+A restored `min_delta` or `max_latency` sets the existing *user-set* flags, or
+the auto-computation at the end of extraction would overwrite the saved value.
+
+The per-pair Exclude checkboxes are deliberately **not** persisted. They have no
+stable identity (see above), and giving them one is a separate redesign rather
+than something to bolt on here.
 
 ## Frame-accuracy caveats
 
